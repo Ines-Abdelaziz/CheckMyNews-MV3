@@ -1,0 +1,141 @@
+//The MIT License
+//
+//Copyright (c) 2018 Athanasios Andreou, <andreou@eurecom.fr>
+//
+//Permission is hereby granted, free of charge,
+//to any person obtaining a copy of this software and
+//associated documentation files (the "Software"), to
+//deal in the Software without restriction, including
+//without limitation the rights to use, copy, modify,
+//merge, publish, distribute, sublicense, and/or sell
+//copies of the Software, and to permit persons to whom
+//the Software is furnished to do so,
+//subject to the following conditions:
+//
+//The above copyright notice and this permission notice
+//shall be included in all copies or substantial portions of the Software.
+//
+//THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+//EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+//OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+//IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR
+//ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+//TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+//SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+// ===============================
+// CheckMyNews - popup.js (MV3)
+// Works with your original HTML
+// ===============================
+
+const CONSENT_PAGE = "./new_consent.html";
+
+// Hide everything initially
+$("#normalView").hide();
+$("#notLoggedInView").hide();
+$("#consentForm").hide();
+
+// -------------------------------
+// 1. Load Consent Status
+// -------------------------------
+function loadConsentStatus() {
+  chrome.runtime.sendMessage({ type: "getConsentStatus" }, (response) => {
+    if (!response || !response.ok) {
+      console.warn("[POPUP] Consent status unavailable.");
+      setTimeout(loadConsentStatus, 3000);
+      return;
+    }
+
+    const hasConsent = response.consent === true;
+    const loggedIn = response.currentUser != null;
+
+    // Not logged in
+    if (!loggedIn) {
+      $("#notLoggedInView").show();
+      $("#normalView").hide();
+      $("#consentForm").hide();
+      return;
+    }
+
+    // Logged in + consent given
+    if (hasConsent) {
+      $("#normalView").show();
+      $("#notLoggedInView").hide();
+      $("#consentForm").hide();
+      return;
+    }
+
+    // Logged in but NO consent → open full consent page
+    chrome.runtime.sendMessage({ type: "openConsentPage" });
+    window.close();
+  });
+}
+
+// -------------------------------
+// 2. Register Consent
+// -------------------------------
+function registerConsent() {
+  chrome.runtime.sendMessage(
+    { type: "registerConsent", payload: { consent: true } },
+    (response) => {
+      if (response && response.ok) {
+        $("#consentForm").hide();
+        $("#normalView").show();
+      } else {
+        alert("Something went wrong. Please try again.");
+      }
+    }
+  );
+}
+
+// -------------------------------
+// 3. Open dedicated consent page
+// -------------------------------
+function openConsentPage() {
+  chrome.tabs.create({
+    url: chrome.runtime.getURL(CONSENT_PAGE),
+  });
+}
+
+// -------------------------------
+// 4. Load Ads Summary
+// -------------------------------
+function loadAdsSummary() {
+  chrome.runtime.sendMessage({ type: "getAdsSummary" }, (response) => {
+    if (!response || !response.ads) return;
+    $("#adsCount").text(response.ads.count || 0);
+  });
+}
+
+// -------------------------------
+// 5. Load News Summary
+// -------------------------------
+function loadNewsSummary() {
+  chrome.runtime.sendMessage({ type: "getNewsActivity" }, (response) => {
+    if (!response || !response.activity) return;
+    $("#newsCount").text(Object.keys(response.activity).length);
+  });
+}
+
+// -------------------------------
+// 6. UI Initialization
+// -------------------------------
+$(document).ready(function () {
+  loadConsentStatus();
+  loadAdsSummary();
+  loadNewsSummary();
+
+  // Buttons
+  $("#consentButton").click(registerConsent);
+  $("#privacyPolicy").click(openConsentPage);
+
+  $("#remindMeTomorrow").click(() => window.close());
+  $("#remindMeInTwelve").click(() => window.close());
+
+  $("#noConsentButton").click(() => {
+    chrome.tabs.create({ url: "chrome://extensions/" });
+    window.close();
+  });
+
+  $("#refreshAds").click(loadAdsSummary);
+});
