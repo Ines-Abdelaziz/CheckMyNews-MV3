@@ -10,11 +10,11 @@ class FBVisibilityTracker {
     this.intervalId = null;
 
     // Configuration
-    this.visibilityThreshold = 0.3; // 30% visible OR 350px height
-    this.visibilityMinHeight = 350;
+    this.visibilityThreshold = 0.2; // 20% visible OR 200px height
+    this.visibilityMinHeight = 200;
     // Visible-time threshold is cumulative across small enter/leave flaps.
-    this.visibilityDuration = 500; // ms
-    this.checkInterval = 500;
+    this.visibilityDuration = 300; // ms
+    this.checkInterval = 250;
   }
 
   /**

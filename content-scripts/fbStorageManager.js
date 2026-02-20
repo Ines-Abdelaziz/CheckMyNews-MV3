@@ -121,9 +121,12 @@ class FBStorageManager {
         throw new Error("Extension context invalidated");
       }
 
-      const registerAdPayloads = dataToSend
-        .map((item) => item?.register_ad_payload)
-        .filter(Boolean);
+      const registerAdPayloads = [];
+      for (const item of dataToSend) {
+        const payload = item?.register_ad_payload;
+        if (!payload) continue;
+        registerAdPayloads.push(payload);
+      }
 
       if (registerAdPayloads.length > 0) {
         const batchResp = await chrome.runtime.sendMessage({

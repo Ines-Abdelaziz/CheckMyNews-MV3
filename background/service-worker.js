@@ -494,28 +494,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          world: "MAIN",
-          func: () => {
-            try {
-              if (window.requireLazy) {
-                window.requireLazy(["CurrentUserInitialData"], function (data) {
-                  if (data?.USER_ID) {
-                    window.postMessage(
-                      {
-                        source: "CMN",
-                        type: "USER_ID",
-                        userId: String(data.USER_ID),
-                      },
-                      "*"
-                    );
-                  }
-                });
-              }
-            } catch (e) {}
-          },
-        });
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            world: "MAIN",
+            func: () => {
+              try {
+                if (window.requireLazy) {
+                  window.requireLazy(["CurrentUserInitialData"], function (data) {
+                    if (data?.USER_ID) {
+                      window.postMessage(
+                        {
+                          source: "CMN",
+                          type: "USER_ID",
+                          userId: String(data.USER_ID),
+                        },
+                        "*"
+                      );
+                    }
+                  });
+                }
+              } catch (e) {}
+            },
+          });
+        } catch (e) {
+          const msg = String(e?.message || e || "");
+          if (msg.includes("Frame with ID") && msg.includes("was removed")) {
+            sendResponse({ ok: false, transient: true, error: "frame_removed" });
+            return;
+          }
+          throw e;
+        }
 
         sendResponse({ ok: true });
         return;
@@ -559,7 +568,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: "UNKNOWN_MESSAGE" });
         return;
     }
-  })();
+  })().catch((e) => {
+    const msg = String(e?.message || e || "unknown_error");
+    try {
+      if (msg.includes("Frame with ID") && msg.includes("was removed")) {
+        sendResponse({ ok: false, transient: true, error: "frame_removed" });
+        return;
+      }
+      sendResponse({ ok: false, error: msg });
+    } catch (_) {}
+  });
 
   return true;
 });

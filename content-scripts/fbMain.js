@@ -313,64 +313,29 @@
       return [...new Set(images.filter(Boolean))];
     }
 
-    extractAdvertiserInfoFromElement(element, postData) {
+    extractAdvertiserInfoFromElement(_element, postData) {
       const advertiser = {
         advertiser_facebook_id: null,
         advertiser_facebook_page: null,
         advertiser_facebook_profile_pic: null,
       };
 
-      advertiser.advertiser_facebook_page = postData?.author?.page || null;
+      if (postData?.author?.page) {
+        try {
+          advertiser.advertiser_facebook_page = new URL(
+            postData.author.page,
+            window.location.origin
+          ).href;
+        } catch {
+          advertiser.advertiser_facebook_page = postData.author.page;
+        }
+      }
       if (postData?.author?.id) {
         advertiser.advertiser_facebook_id = String(postData.author.id);
       }
       if (postData?.author?.profile_picture) {
         advertiser.advertiser_facebook_profile_pic =
           postData.author.profile_picture;
-      }
-
-      const profileLink = element
-        ? Array.from(element.querySelectorAll('a[role="link"][href]')).find(
-            (link) => {
-              const href = link.getAttribute("href") || "";
-              if (!href.includes("facebook.com")) return false;
-              if (href.includes("/posts/")) return false;
-              if (href.includes("/videos/")) return false;
-              if (href.includes("/photos/")) return false;
-              return true;
-            }
-          )
-        : null;
-
-      if (profileLink) {
-        const href = profileLink.getAttribute("href");
-        if (href) {
-          try {
-            advertiser.advertiser_facebook_page = new URL(
-              href,
-              window.location.origin
-            ).href;
-          } catch {
-            advertiser.advertiser_facebook_page = href;
-          }
-          const match =
-            href.match(/profile\.php\?id=(\d+)/) ||
-            href.match(/facebook\.com\/pages\/[^/]+\/(\d+)/) ||
-            href.match(/facebook\.com\/([^/?#]+)/);
-          if (match && match[1]) {
-            advertiser.advertiser_facebook_id = match[1];
-          }
-        }
-      }
-
-      const name = postData?.author?.name || null;
-      if (element && name) {
-        const img = Array.from(element.querySelectorAll("img[alt]")).find(
-          (el) => (el.getAttribute("alt") || "").includes(name)
-        );
-        if (img?.getAttribute("src")) {
-          advertiser.advertiser_facebook_profile_pic = img.getAttribute("src");
-        }
       }
 
       return advertiser;
@@ -437,7 +402,7 @@
       return [...urls].filter(Boolean);
     }
 
-    extractVideoInfo(postData, element) {
+    extractVideoInfo(postData) {
       const graphqlVideo =
         (Array.isArray(postData?.videos) && postData.videos.find((v) => v)) ||
         null;
@@ -447,14 +412,9 @@
           video_id: graphqlVideo.videoId || graphqlVideo.id || "",
         };
       }
-
-      const videoEl = element ? element.querySelector("video") : null;
       return {
-        video: Boolean(videoEl),
-        video_id:
-          videoEl?.getAttribute("data-video-id") ||
-          videoEl?.getAttribute("id") ||
-          "",
+        video: false,
+        video_id: "",
       };
     }
 
@@ -476,6 +436,7 @@
 
     buildRegisterAdPayload(postData) {
       if (!postData) return null;
+      const postId = postData.post_id || postData.id;
 
       const isSponsored = Boolean(
         postData.ad?.ad_id || postData.isSponsored || postData.sponsored
@@ -485,11 +446,8 @@
         ? this.newsFilter.isNewsPost(postData)
         : false;
 
-      const postId = postData.post_id || postData.id;
-      const element = this.domElementByPostId.get(postId) || null;
-      const isPublicPost = element
-        ? this.isPublicPostElement(element)
-        : !this.isPrivatePost(postData);
+      const isPublicPost =
+        !isSponsored && !isNewsPost && !this.isPrivatePost(postData);
 
       if (!isSponsored && !isNewsPost && !isPublicPost) return null;
 
@@ -504,52 +462,57 @@
       const postIdentifier = postData.post_id || postData.id || null;
       const htmlId =
         postType === "publicPost"
-          ? String(
-              postIdentifier ||
-                element?.id ||
-                element?.getAttribute?.("data-pagelet") ||
-                this.generateAdAnalystId()
-            )
-          : graphQlAdId ||
-            element?.id ||
-            element?.getAttribute?.("data-pagelet") ||
-            this.generateAdAnalystId();
+          ? String(postIdentifier || this.generateAdAnalystId())
+          : graphQlAdId || String(postIdentifier || this.generateAdAnalystId());
 
-      const visibleFraction = (() => {
-        if (!element || !this.visibilityTracker?.getVisibleState) return [];
-        const state = this.visibilityTracker.getVisibleState(element);
-        if (!state || !state.totalHeight) return [];
-        return state.visibleHeight / state.totalHeight;
-      })();
+      const visibleFraction =
+        typeof postData?.visible_fraction === "number"
+          ? postData.visible_fraction
+          : 1;
 
       const landingPages = this.extractLandingPagesFromPostData(postData);
       const images = this.extractGraphqlImages(postData);
       const videos = this.extractGraphqlVideos(postData);
-      const { video, video_id } = this.extractVideoInfo(postData, element);
+      const { video, video_id } = this.extractVideoInfo(postData);
       const attachment_media_urls = this.extractAttachmentMediaUrls(postData);
 
-      const advertiser = this.extractAdvertiserInfoFromElement(
-        element,
-        postData
-      );
+      const advertiser = this.extractAdvertiserInfoFromElement(null, postData);
+
+      const maxRawAdLength = 30000;
+      const rawAdGraphQL =
+        typeof postData?.raw_ad === "string"
+          ? postData.raw_ad
+          : typeof postData?.rawAd === "string"
+          ? postData.rawAd
+          : JSON.stringify({
+              post_id: postData.post_id || null,
+              id: postData.id || null,
+              message: postData.message || "",
+              url: postData.url || "",
+              author: postData.author || null,
+              attachments: Array.isArray(postData.attachments)
+                ? postData.attachments
+                : [],
+              ad: postData.ad || null,
+            });
+      const safeRawAd =
+        rawAdGraphQL.length > maxRawAdLength
+          ? rawAdGraphQL.slice(0, maxRawAdLength)
+          : rawAdGraphQL;
 
       const payload = {
-        raw_ad: element?.innerHTML || "",
+        raw_ad: safeRawAd,
         html_ad_id: htmlId,
         fb_id: postData.post_id || postData.id || null,
-        objId: postData.id || null,
+        objId: isSponsored ? postData.id || null : null,
         visible: true,
         visible_fraction: visibleFraction,
         visibleDuration: Array.isArray(postData.visibleDuration)
           ? postData.visibleDuration
           : [],
         timestamp: Date.now(),
-        offsetX: element
-          ? element.getBoundingClientRect().left + window.scrollX
-          : 0,
-        offsetY: element
-          ? element.getBoundingClientRect().top + window.scrollY
-          : 0,
+        offsetX: typeof postData?.offsetX === "number" ? postData.offsetX : 0,
+        offsetY: typeof postData?.offsetY === "number" ? postData.offsetY : 0,
         type: postType,
         images,
         videos,
@@ -630,13 +593,9 @@
     queuePostForSending(postData) {
       if (!postData) return false;
 
-      if (postData.queued) {
-        return false;
-      }
+      if (postData.queued) return false;
 
-      if (this.isPrivatePost(postData)) {
-        return false;
-      }
+      if (this.isPrivatePost(postData)) return false;
 
       postData.queued = true;
       if (!postData.register_ad_payload) {
@@ -660,7 +619,6 @@
 
     async init() {
       if (this.initialized) return;
-
 
       try {
         // Load config
@@ -705,9 +663,7 @@
               post?.ad?.client_token || post?.ad_client_token || null,
           };
           if (typeof postData.isSponsored !== "boolean") {
-            postData.isSponsored = Boolean(
-              postData.ad?.ad_id || postData.sponsored
-            );
+            postData.isSponsored = Boolean(postData.ad?.ad_id);
           }
 
           const bootstrapId = post?.post_id || post?.id || null;
@@ -747,14 +703,43 @@
     // ✅ Setup bridge to receive posts from injected GraphQL script
     setupGraphQLBridge() {
       window.addEventListener("CMN_POSTS_EXTRACTED", (event) => {
-        const { posts } = event.detail;
-
-
+        const posts = Array.isArray(event?.detail?.posts)
+          ? event.detail.posts
+          : [];
+        if (posts.length === 0) return;
         posts.forEach((post) => {
           this.handleGraphQLPost(post);
         });
       });
 
+      window.addEventListener("message", (event) => {
+        const data = event.data || {};
+        if (data.source !== "CMN_PAGE") {
+          return;
+        }
+        // If this is a subframe, relay GraphQL payloads up to top frame so
+        // the main pipeline (visibility/matching/queue) can consume one stream.
+        if (
+          window.top !== window &&
+          data.type === "CMN_GRAPHQL_POSTS" &&
+          data.relayedTop !== true
+        ) {
+          try {
+            window.top.postMessage({ ...data, relayedTop: true }, "*");
+          } catch (_) {}
+        }
+        if (data.type === "CMN_GRAPHQL_READY") {
+          return;
+        }
+
+        if (data.type !== "CMN_GRAPHQL_POSTS") return;
+
+        const posts = Array.isArray(data.posts) ? data.posts : [];
+        if (posts.length === 0) return;
+        posts.forEach((post) => {
+          this.handleGraphQLPost(post);
+        });
+      });
     }
 
     // ✅ FIXED: Handle GraphQL posts with proper deduplication
@@ -764,13 +749,9 @@
         this.log("GraphQL post received", post?.post_id);
 
         const postId = post.post_id || post.id;
-        if (!postId) {
-          return;
-        }
+        if (!postId) return;
 
-        if (this.postDetector.isProcessedGraphQL(postId)) {
-          return;
-        }
+        if (this.postDetector.isProcessedGraphQL(postId)) return;
 
         this.postDetector.markAsProcessedGraphQL(postId);
 
@@ -810,9 +791,7 @@
             share_count: null,
           },
           ad: post.ad || null,
-          isSponsored: Boolean(
-            post.ad?.ad_id || post.isSponsored || post.sponsored
-          ),
+          isSponsored: Boolean(post.ad?.ad_id),
           externalDomain: this.extractDomain(post.url),
           detectedAt: Date.now(),
           source: "graphql",
@@ -850,17 +829,13 @@
       try {
         this.stats.postsDetected++;
 
-        if (this.postDetector.isProcessed(postElement)) {
-          return;
-        }
+        if (this.postDetector.isProcessed(postElement)) return;
 
         const domMetadata = this.extractDomMetadata(postElement);
         const domFingerprint = this.buildFingerprint(domMetadata);
         const domPostId = domMetadata.postId;
 
-        if (!domFingerprint && !domPostId) {
-          return;
-        }
+        if (!domFingerprint && !domPostId) return;
 
         this.log("DOM fingerprint detected", domFingerprint);
 
@@ -965,7 +940,6 @@
         this.visibilityTracker.track(pending.element, realId);
         this.domElementByPostId.set(realId, pending.element);
       }
-
     }
 
     // Handle when posts become visible
@@ -992,7 +966,6 @@
             });
           }
 
-
           this.storageManager.updatePost(postData.id, {
             visibleAt: postData.visibleAt,
             seenAt: postData.seenAt,
@@ -1009,19 +982,21 @@
               }
             }
             const dbId = postData.dbId || null;
-            try {
-              chrome.runtime
-                .sendMessage({
-                  type: "adVisibility",
-                  dbId,
-                  adId: postData.ad.ad_id,
-                  postId,
-                  started_ts: postData.visibleAt,
-                  end_ts: null,
-                  visible_fraction: visibleFraction,
-                })
-                .catch(() => {});
-            } catch (_) {}
+            if (dbId) {
+              try {
+                chrome.runtime
+                  .sendMessage({
+                    type: "adVisibility",
+                    dbId,
+                    adId: postData.ad.ad_id,
+                    postId,
+                    started_ts: postData.visibleAt,
+                    end_ts: null,
+                    visible_fraction: visibleFraction,
+                  })
+                  .catch(() => {});
+              } catch (_) {}
+            }
           }
 
           if (postData.isSponsored) {
@@ -1048,7 +1023,6 @@
       const postId = postData.post_id || postData.id;
       const adId = postData?.ad?.ad_id;
 
-
       if (!adId) {
         return;
       }
@@ -1065,7 +1039,6 @@
         if (!clientToken) {
           return;
         }
-
 
         const handleSilentExplanation = (explanation, meta = {}) => {
           if (!explanation) {
@@ -1129,7 +1102,6 @@
               return;
             }
 
-
             const primed = await fetcher.primeDocIdSilently(element, {
               postId,
               adId,
@@ -1146,8 +1118,7 @@
                   clientToken
                 );
               handleSilentExplanation(explanation, { primed: true });
-            } catch (retryErr) {
-            }
+            } catch (retryErr) {}
           });
 
         return;
@@ -1198,8 +1169,7 @@
             }
           );
         })
-        .catch((e) => {
-        });
+        .catch((e) => {});
     }
 
     // Check if element is already fully visible
@@ -1278,11 +1248,15 @@
         if (!Array.isArray(postData.visibleDuration)) {
           postData.visibleDuration = [];
         }
-        const last = postData.visibleDuration[postData.visibleDuration.length - 1];
+        const last =
+          postData.visibleDuration[postData.visibleDuration.length - 1];
         if (last && last.end_ts === null && last.started_ts === startedTs) {
           last.end_ts = endTs;
         } else {
-          postData.visibleDuration.push({ started_ts: startedTs, end_ts: endTs });
+          postData.visibleDuration.push({
+            started_ts: startedTs,
+            end_ts: endTs,
+          });
         }
 
         this.storageManager.updatePost(postData.id, {
@@ -1335,8 +1309,7 @@
         if (result.cmn_config) {
           this.config = { ...this.config, ...result.cmn_config };
         }
-      } catch (error) {
-      }
+      } catch (error) {}
     }
 
     async updateConfig(newConfig) {
@@ -1344,8 +1317,7 @@
 
       try {
         await chrome.storage.local.set({ cmn_config: this.config });
-      } catch (error) {
-      }
+      } catch (error) {}
     }
 
     getStats() {

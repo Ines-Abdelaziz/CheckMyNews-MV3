@@ -22,6 +22,29 @@ class FBGraphQLInterceptor {
     this.store = window.__CMN_GRAPHQL_STORE__;
     this.originalFetch = window.fetch;
     this.originalXHR = window.XMLHttpRequest;
+    this.interceptStats = { fetch: 0, xhr: 0 };
+    this.fetchWrapper = null;
+    this.xhrWrapper = null;
+  }
+
+  normalizeRequestUrl(input) {
+    if (!input) return "";
+    if (typeof input === "string") return input;
+    if (typeof input.url === "string") return input.url;
+    try {
+      return String(input);
+    } catch {
+      return "";
+    }
+  }
+
+  emitToContextAndTop(payload) {
+    window.postMessage(payload, "*");
+    try {
+      if (window.top && window.top !== window) {
+        window.top.postMessage(payload, "*");
+      }
+    } catch (_) {}
   }
 
   /* ---------------- DOC ID CAPTURE ---------------- */
@@ -57,22 +80,29 @@ class FBGraphQLInterceptor {
     if (cleanName) {
       window.__CMN_WAIST_DOC_IDS__.set(cleanName, docId);
     }
-
   }
 
   start() {
     if (this.started) return;
     this.started = true;
 
-
     this.interceptFetch();
     this.interceptXHR();
+    setInterval(() => {
+      try {
+        if (this.fetchWrapper && window.fetch !== this.fetchWrapper) {
+          window.fetch = this.fetchWrapper;
+        }
+        if (this.xhrWrapper && window.XMLHttpRequest !== this.xhrWrapper) {
+          window.XMLHttpRequest = this.xhrWrapper;
+        }
+      } catch (_) {}
+    }, 2000);
     // At the end of your GraphQL interceptor
     window.__CMN_GRAPHQL_POSTS__ = window.__CMN_EXTRACTED_POSTS__ || [];
 
     // Emit custom event when posts are added
-    window.addEventListener("CMN_POSTS_EXTRACTED", (event) => {
-    });
+    window.addEventListener("CMN_POSTS_EXTRACTED", (event) => {});
   }
 
   /* ---------------- FETCH ---------------- */
@@ -80,19 +110,20 @@ class FBGraphQLInterceptor {
   interceptFetch() {
     const self = this;
 
-    window.fetch = async function (...args) {
+    const wrappedFetch = async function (...args) {
       try {
-        const url = args[0];
+        const url = self.normalizeRequestUrl(args[0]);
         const init = args[1] || {};
-        if (typeof url === "string" && url.includes("graphql")) {
+        if (url.includes("graphql")) {
           self.maybeCaptureDocIdFromBody(init.body);
         }
       } catch (_) {}
 
       const response = await self.originalFetch.apply(this, args);
       try {
-        const url = args[0];
-        if (typeof url === "string" && url.includes("graphql")) {
+        const url = self.normalizeRequestUrl(args[0]);
+        if (url.includes("graphql")) {
+          self.interceptStats.fetch += 1;
           response
             .clone()
             .text()
@@ -103,6 +134,8 @@ class FBGraphQLInterceptor {
 
       return response;
     };
+    self.fetchWrapper = wrappedFetch;
+    window.fetch = wrappedFetch;
   }
 
   /* ---------------- XHR ---------------- */
@@ -110,12 +143,12 @@ class FBGraphQLInterceptor {
   interceptXHR() {
     const self = this;
 
-    window.XMLHttpRequest = function () {
+    const WrappedXHR = function () {
       const xhr = new self.originalXHR();
 
       const open = xhr.open;
       xhr.open = function (method, url, ...rest) {
-        this.__cmn_url = url;
+        this.__cmn_url = self.normalizeRequestUrl(url);
         return open.call(this, method, url, ...rest);
       };
 
@@ -124,11 +157,22 @@ class FBGraphQLInterceptor {
         if (this.__cmn_url?.includes("graphql")) {
           self.maybeCaptureDocIdFromBody(body);
         }
-        return send.call(this, body);
+        try {
+          return send.call(this, body);
+        } catch (e) {
+          const badExtensionUrl =
+            typeof this.__cmn_url === "string" &&
+            this.__cmn_url.startsWith("chrome-extension://invalid/");
+          if (badExtensionUrl) {
+            return;
+          }
+          throw e;
+        }
       };
 
       xhr.addEventListener("load", function () {
         if (!this.__cmn_url?.includes("graphql")) return;
+        self.interceptStats.xhr += 1;
 
         // Get response text
         let text = "";
@@ -144,19 +188,13 @@ class FBGraphQLInterceptor {
 
         if (!text) return;
 
-        try {
-          // Parse the JSON (handles newline-separated chunks)
-          const jsonData = self.parseJsonSafely(text);
-
-          // Extract posts
-          const posts = self.extractFacebookPosts(jsonData);
-          self.handleExtractedPosts(posts);
-        } catch (e) {
-        }
+        self.parseGraphQLText(text);
       });
 
       return xhr;
     };
+    self.xhrWrapper = WrappedXHR;
+    window.XMLHttpRequest = WrappedXHR;
   }
 
   /* ---------------- PARSING ---------------- */
@@ -170,7 +208,9 @@ class FBGraphQLInterceptor {
     const lines = text.split("\n");
 
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
+      let line = lines[i].trim();
+      line = line.replace(/^for\s*\(;;\);\s*/, "");
+      line = line.replace(/^\)\]\}'\s*/, "");
 
       if (!line) continue; // Skip empty lines
 
@@ -209,6 +249,21 @@ class FBGraphQLInterceptor {
       const posts = this.extractFacebookPosts(jsonData);
       this.handleExtractedPosts(posts);
     } catch (e) {
+      // Fallback parser for payloads that are not line-delimited JSON.
+      try {
+        const blocks = this.extractJSONBlocks(text);
+        if (!Array.isArray(blocks) || blocks.length === 0) return;
+
+        const extracted = [];
+        for (const block of blocks) {
+          try {
+            const parsed = JSON.parse(block);
+            const post = this.extractPostData(parsed);
+            if (post) extracted.push(post);
+          } catch (_) {}
+        }
+        this.handleExtractedPosts(extracted);
+      } catch (_) {}
     }
   }
 
@@ -232,6 +287,16 @@ class FBGraphQLInterceptor {
         },
       })
     );
+
+    // Also bridge through postMessage for content-script isolated world reliability.
+    this.emitToContextAndTop({
+      source: "CMN_PAGE",
+      type: "CMN_GRAPHQL_POSTS",
+      posts,
+      count: posts.length,
+      timestamp: Date.now(),
+      frameHref: location.href,
+    });
   }
   extractJSONBlocks(text) {
     const results = [];
@@ -469,7 +534,6 @@ class FBGraphQLInterceptor {
     } catch (e) {
       // Privacy extraction failed
     }
-
     return post;
   }
 
@@ -732,7 +796,6 @@ async function fetchAdExplanationGraphQL({ adId, clientToken }) {
     ? docModuleName.replace(/\$Parameters$/, "")
     : "CometAdPrefsWAISTDialogRootQuery";
 
-
   const requestId = `${Date.now()}_${adId}`;
 
   const fieldsPayload = {
@@ -853,4 +916,22 @@ window.addEventListener("message", async (event) => {
   const interceptor = new FBGraphQLInterceptor();
   interceptor.start();
   window.__CMN_GRAPHQL_INTERCEPTOR__ = interceptor;
+  interceptor.emitToContextAndTop({
+    source: "CMN_PAGE",
+    type: "CMN_GRAPHQL_READY",
+    ts: Date.now(),
+    frameHref: location.href,
+  });
+  setInterval(() => {
+    interceptor.emitToContextAndTop({
+      source: "CMN_PAGE",
+      type: "CMN_GRAPHQL_TAP",
+      fetch: interceptor.interceptStats.fetch,
+      xhr: interceptor.interceptStats.xhr,
+      fetch_hooked: window.fetch === interceptor.fetchWrapper,
+      xhr_hooked: window.XMLHttpRequest === interceptor.xhrWrapper,
+      href: location.href,
+      frameHref: location.href,
+    });
+  }, 5000);
 })();

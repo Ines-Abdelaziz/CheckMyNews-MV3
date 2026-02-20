@@ -78,7 +78,7 @@
 
     return {
       postId,
-      dbId: postData?.dbId || postData?.ad?.ad_id || null,
+      dbId: postData?.dbId || null,
       adId: postData?.ad?.ad_id || null,
       lastAdPosition: getRectSnapshot(el),
       imagePosition: getRectSnapshot(target?.closest?.("img")),
@@ -92,16 +92,15 @@
       if (ts - lastClick < CLICK_THROTTLE_MS) return;
       lastClick = ts;
 
-      const { postId, adId, dbId } = getPostContextFromTarget(
-        event.target
-      );
+      const { postId, adId, dbId } = getPostContextFromTarget(event.target);
+      if (!dbId) return;
 
       try {
         if (chrome?.runtime?.id) {
           chrome.runtime
             .sendMessage({
               type: "mouseClick",
-              dbId: dbId || adId || null,
+              dbId,
               eventType: inferClickType(event.target),
               postId,
               adId,
@@ -122,6 +121,7 @@
       lastMove = ts;
       const { dbId, adId, lastAdPosition, imagePosition } =
         getPostContextFromTarget(event.target);
+      if (!dbId) return;
       const windowSnapshot = getWindowSnapshot();
       const frames = [
         {
@@ -136,7 +136,7 @@
           chrome.runtime
             .sendMessage({
               type: "mouseMove",
-              dbId: dbId || adId || null,
+              dbId,
               timeElapsed: getTimeElapsed(),
               frames,
               window: windowSnapshot,

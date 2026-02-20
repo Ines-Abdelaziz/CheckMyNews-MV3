@@ -343,7 +343,6 @@ export async function handleRegisterAdBatch(
         hashFn
       );
       validateAndLogRegisterAdPayload(requestPayload);
-
       try {
         const out = await postJSON(URLS_SERVER.registerAd, requestForServer);
         success++;
@@ -373,6 +372,7 @@ function buildRegisterAdRequestPayload(payload, userId, mediaContent) {
   };
   for (const [k, v] of Object.entries(payload || {})) {
     if (!REGISTER_AD_ALLOWED_FIELDS.has(k)) continue;
+    if (v === undefined || v === null) continue;
     requestPayload[k] = v;
   }
   return requestPayload;
