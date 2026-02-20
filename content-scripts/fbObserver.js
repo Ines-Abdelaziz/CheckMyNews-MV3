@@ -1,5 +1,4 @@
 // content-scripts/fbObserver.js
-console.log("[CMN] fbObserver loaded");
 function isPublicPost(post) {
   const svgs = post.querySelectorAll("svg");
 
@@ -28,31 +27,28 @@ class FBObserver {
     this.isObserving = false;
     this.reconnectAttempts = 0;
     this.maxReconnectAttempts = 5;
+    this.initialScanTimer = null;
+    // Delay initial DOM scan slightly so bootstrap/GraphQL caches can warm up.
+    this.initialScanDelayMs = 1500;
   }
 
   // Find the main feed container
   findFeedContainer() {
-    console.log("[CMN] Using document.body as observer root");
     return document.body;
   }
 
   // Start observing the feed
   start() {
     if (this.isObserving) {
-      console.log("[CMN] Observer already running");
       return;
     }
 
     this.feedContainer = this.findFeedContainer();
 
     if (!this.feedContainer) {
-      console.log("[CMN] Feed not ready, will retry...");
       this.scheduleReconnect();
       return;
     }
-
-    // Process existing posts first
-    this.processExistingPosts();
 
     // Setup mutation observer
     this.observer = new MutationObserver((mutations) => {
@@ -66,7 +62,13 @@ class FBObserver {
 
     this.isObserving = true;
     this.reconnectAttempts = 0;
-    console.log("[CMN] Observer started successfully");
+
+    if (this.initialScanTimer) clearTimeout(this.initialScanTimer);
+    this.initialScanTimer = setTimeout(() => {
+      // Only run if still observing.
+      if (this.isObserving) this.processExistingPosts();
+      this.initialScanTimer = null;
+    }, this.initialScanDelayMs);
   }
 
   // Stop observing
@@ -75,8 +77,11 @@ class FBObserver {
       this.observer.disconnect();
       this.observer = null;
     }
+    if (this.initialScanTimer) {
+      clearTimeout(this.initialScanTimer);
+      this.initialScanTimer = null;
+    }
     this.isObserving = false;
-    console.log("[CMN] Observer stopped");
   }
 
   // Process existing posts in feed
@@ -84,7 +89,6 @@ class FBObserver {
     if (!this.feedContainer) return;
 
     const existingPosts = this.findAllPostElements(this.feedContainer);
-    console.log(`[CMN] Processing ${existingPosts.length} existing posts`);
 
     existingPosts.forEach((post) => {
       if (this.onPostFound) {
@@ -105,23 +109,24 @@ class FBObserver {
 
         processedNodes.add(node);
 
+        const found = new Set();
+
         // Check if node itself is a post
         if (this.isPostElement(node)) {
-          if (this.onPostFound) {
-            this.onPostFound(node);
-          }
+          found.add(node);
         }
 
         // Check for posts within the node
-        // const posts = this.findAllPostElements(node);
-        // posts.forEach((post) => {
-        //   if (!processedNodes.has(post)) {
-        //     processedNodes.add(post);
-        //     if (this.onPostFound) {
-        //       this.onPostFound(post);
-        //     }
-        //   }
-        // });
+        const posts = this.findAllPostElements(node);
+        posts.forEach((post) => found.add(post));
+
+        found.forEach((post) => {
+          if (processedNodes.has(post)) return;
+          processedNodes.add(post);
+          if (this.onPostFound) {
+            this.onPostFound(post);
+          }
+        });
       });
 
       // Handle removed nodes (optional)
@@ -156,41 +161,81 @@ class FBObserver {
 
   // Find all post elements in a container
   findAllPostElements(container) {
-    const profiles = container.querySelectorAll(
-      '[data-ad-rendering-role^="profile_name"]'
+    const markers = container.querySelectorAll(
+      'div[data-ad-rendering-role="profile_name"], [data-ad-rendering-role="story_message"]'
     );
 
     const posts = [];
 
-    profiles.forEach((profile) => {
-      const post = profile.closest('div[data-virtualized="false"]');
-      if (isPublicPost(post)) posts.push(post);
+    markers.forEach((marker) => {
+      const post = this.findPostContainerFromMarker(marker);
+      if (post && this.isValidPostElement(post)) posts.push(post);
     });
 
-    console.log(`[CMN] Found ${posts.length} public posts via profile headers`);
-    return [...new Set(posts)];
+    const deduped = [...new Set(posts)];
+    return deduped;
   }
 
   // Check if element is a post
   isPostElement(element) {
     if (!element || !element.querySelector) return false;
 
-    return !!element.querySelector('[data-ad-rendering-role^="profile_name"]');
+    const hasMessage = !!element.querySelector(
+      '[data-ad-rendering-role="story_message"], [data-ad-preview="message"], [data-ad-comet-preview="message"]'
+    );
+    const hasProfile = !!element.querySelector(
+      '[data-ad-rendering-role="profile_name"], [role="link"][href*="/profile.php"]'
+    );
+    const hasToolbar = !!element.querySelector(
+      '[aria-label="Actions for this post"]'
+    );
+
+    const isArticle = element.getAttribute("role") === "article";
+
+    return hasProfile && (hasMessage || hasToolbar);
+  }
+
+  // Find post container from a marker element
+  findPostContainerFromMarker(marker) {
+    if (!marker) return null;
+
+    // Fast path: FB often wraps posts in virtualized container
+    const virtualized = marker.closest('div[data-virtualized="false"]');
+    if (virtualized && this.isPostElement(virtualized)) return virtualized;
+
+    // Walk up to find a container with expected markers
+    let current = marker;
+    let depth = 0;
+    const maxDepth = 12;
+
+    while (current && current !== document.body && depth < maxDepth) {
+      if (this.isPostElement(current)) return current;
+      current = current.parentElement;
+      depth++;
+    }
+
+    return null;
+  }
+
+  // Basic sanity check for post-like nodes
+  isValidPostElement(element) {
+    if (!element) return false;
+    const text = element.textContent?.trim() || "";
+    const hasEnoughText = text.length > 20;
+    const visible =
+      (element.offsetWidth || 0) > 0 && (element.offsetHeight || 0) > 0;
+    return hasEnoughText && visible;
   }
 
   // Schedule reconnection attempt
   scheduleReconnect() {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error("[CMN] Max reconnection attempts reached");
       return;
     }
 
     this.reconnectAttempts++;
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 10000);
 
-    console.log(
-      `[CMN] Scheduling reconnect attempt ${this.reconnectAttempts} in ${delay}ms`
-    );
 
     setTimeout(() => {
       this.start();
@@ -199,7 +244,6 @@ class FBObserver {
 
   // Reset observer (useful for navigation)
   reset() {
-    console.log("[CMN] Resetting observer");
     this.stop();
     this.reconnectAttempts = 0;
     setTimeout(() => this.start(), 1000);

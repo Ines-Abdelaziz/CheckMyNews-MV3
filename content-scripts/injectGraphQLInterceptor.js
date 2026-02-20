@@ -1,5 +1,4 @@
 // content-scripts/injectGraphQLInterceptor.js
-console.log("[CMN][Injector] Injecting GraphQL interceptor");
 
 (function inject() {
   if (window.__CMN_GRAPHQL_INJECTED__) return;
@@ -15,7 +14,6 @@ console.log("[CMN][Injector] Injecting GraphQL interceptor");
   //   script.type = "text/javascript";
 
   //   script.onload = () => {
-  //     console.log("[CMN][Injector] ✅ Injected");
   //     // script.remove();
   //   };
 

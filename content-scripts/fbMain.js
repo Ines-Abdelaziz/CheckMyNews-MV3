@@ -1,5 +1,4 @@
-// content-scripts/fbMain.js
-console.log("[CMN] fbMain starting");
+// content-scripts/fbMain.js - FULLY FIXED VERSION
 
 (function () {
   if (!location.hostname.includes("facebook.com")) return;
@@ -7,8 +6,6 @@ console.log("[CMN] fbMain starting");
   class CheckMyNewsMain {
     constructor() {
       // Components
-      this.graphqlInterceptor = null;
-      this.graphql = null;
       this.observer = null;
       this.postDetector = null;
       this.dataExtractor = null;
@@ -16,10 +13,16 @@ console.log("[CMN] fbMain starting");
       this.storageManager = null;
       this.messageHandler = null;
       this.bootstrapBridge = null;
+      this.visibilityTracker = null;
+      this.adActivityTracker = null;
 
       // State
       this.monitoring = false;
       this.initialized = false;
+      this.graphqlPostsMap = new Map();
+      this.domPostsInProcess = new Map();
+      this.pendingDomByFingerprint = new Map();
+      this.docIdPrimeAttempts = new Set();
 
       // Config
       this.config = {
@@ -27,6 +30,9 @@ console.log("[CMN] fbMain starting");
         debugMode: false,
         collectSponsored: true,
         autoStart: true,
+        explanationsEnabled: false,
+        silentExplanationFetch: false,
+        collectAdActivity: false,
       };
 
       // Stats
@@ -36,23 +42,631 @@ console.log("[CMN] fbMain starting");
         adsCollected: 0,
         regularPostsIgnored: 0,
         errors: 0,
-        graphqlPostsReceived: 0, // ✅ From GraphQL XHR
-        bootstrapPostsReceived: 0, // ✅ From Bootstrap extractor
-        domPostsVerified: 0, // ✅ Posts found in DOM
+        graphqlPostsReceived: 0,
+        postsFoundInDOM: 0,
+        explanationsTriggered: 0,
       };
+
+      this.fingerprintIndex = new Map(); // fingerprint -> Set of post_ids
+      this.domElementByPostId = new Map(); // postId -> HTMLElement (best-effort)
+    }
+
+    normalizeStringForFingerprint(text) {
+      if (!text) return "";
+      return (
+        text
+          .toLowerCase()
+          .replace(/[\u200B-\u200D\uFEFF]/g, "")
+          // Strip Arabic diacritics and tatweel to improve matching.
+          .replace(/[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]/g, "")
+          // Keep letters/numbers from all languages (e.g., Arabic), drop punctuation.
+          .replace(/[^\p{L}\p{N}\s]/gu, "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 48)
+      );
+    }
+
+    buildFingerprint({ authorName, groupName, message }) {
+      const normalizedMessage = this.normalizeStringForFingerprint(message);
+      if (normalizedMessage) {
+        return normalizedMessage;
+      }
+      const normalizedAuthor = this.normalizeStringForFingerprint(authorName);
+      if (normalizedAuthor) {
+        return `author:${normalizedAuthor}`;
+      }
+      const normalizedGroup = this.normalizeStringForFingerprint(groupName);
+      if (normalizedGroup) {
+        return `group:${normalizedGroup}`;
+      }
+      return null;
+    }
+
+    registerFingerprint(postData) {
+      if (!postData) return;
+      const fingerprint = this.buildFingerprint({
+        authorName: postData.author?.name,
+        groupName: postData.to?.name,
+        message: postData.message,
+      });
+      if (!fingerprint) return;
+      postData.matchFingerprint = fingerprint;
+      const bucket = this.fingerprintIndex.get(fingerprint) || new Set();
+      const key = postData.post_id || postData.id;
+      if (key) {
+        bucket.add(key);
+        this.fingerprintIndex.set(fingerprint, bucket);
+      }
+    }
+
+    matchGraphQLByFingerprint(fingerprint) {
+      if (!fingerprint) return null;
+      const bucket = this.fingerprintIndex.get(fingerprint);
+      if (!bucket) return null;
+      for (const postId of bucket) {
+        const candidate = this.graphqlPostsMap.get(postId);
+        if (candidate && !candidate.inDOM) {
+          return candidate;
+        }
+      }
+      return null;
+    }
+
+    matchGraphQLByMessagePrefix(domMetadata) {
+      const domMessage = this.normalizeStringForFingerprint(
+        domMetadata?.message
+      );
+      if (!domMessage) return null;
+
+      const domAuthor = this.normalizeStringForFingerprint(
+        domMetadata?.authorName
+      );
+      const domGroup = this.normalizeStringForFingerprint(
+        domMetadata?.groupName
+      );
+
+      const domTokens = domMessage.split(" ").filter(Boolean);
+      const domTokenPrefix =
+        domTokens.length >= 3 ? domTokens.slice(0, 3).join(" ") : domMessage;
+
+      for (const candidate of this.graphqlPostsMap.values()) {
+        if (!candidate || candidate.inDOM) continue;
+        const candidateMessage = this.normalizeStringForFingerprint(
+          candidate.message
+        );
+        if (!candidateMessage) continue;
+
+        if (
+          !candidateMessage.startsWith(domMessage) &&
+          !candidateMessage.startsWith(domTokenPrefix)
+        ) {
+          continue;
+        }
+
+        if (domAuthor) {
+          const candAuthor = this.normalizeStringForFingerprint(
+            candidate.author?.name
+          );
+          if (candAuthor && candAuthor !== domAuthor) continue;
+        }
+
+        if (domGroup) {
+          const candGroup = this.normalizeStringForFingerprint(
+            candidate.to?.name
+          );
+          if (candGroup && candGroup !== domGroup) continue;
+        }
+
+        return candidate;
+      }
+
+      return null;
+    }
+
+    extractDomMetadata(element) {
+      return {
+        postId: this.extractPostIdFromElement(element),
+        authorName: this.extractProfileNameFromElement(element),
+        groupName: this.extractGroupNameFromElement(element),
+        message: this.extractPostMessageFromElement(element),
+      };
+    }
+
+    extractPostIdFromElement(element) {
+      try {
+        if (!element) return null;
+
+        // Direct attributes
+        const direct =
+          element.getAttribute("data-post-id") ||
+          element.getAttribute("data-feed-item-id") ||
+          element.getAttribute("data-story-id");
+        if (direct && /^\d{6,}$/.test(direct)) return direct;
+
+        // Look for any descendant carrying known ids
+        const candidate = element.querySelector(
+          "[data-post-id], [data-feed-item-id], [data-story-id]"
+        );
+        if (candidate) {
+          const val =
+            candidate.getAttribute("data-post-id") ||
+            candidate.getAttribute("data-feed-item-id") ||
+            candidate.getAttribute("data-story-id");
+          if (val && /^\d{6,}$/.test(val)) return val;
+        }
+
+        // data-ft is often JSON with top_level_post_id / content_owner_id_new
+        const dataFtEl = element.querySelector("[data-ft]") || element;
+        const dataFt = dataFtEl?.getAttribute("data-ft");
+        if (dataFt) {
+          try {
+            const parsed = JSON.parse(dataFt);
+            const id =
+              parsed?.top_level_post_id ||
+              parsed?.top_level_post_id_for_top_level_comments ||
+              parsed?.content_owner_id_new ||
+              null;
+            if (id && /^\d{6,}$/.test(String(id))) return String(id);
+          } catch (_) {
+            // data-ft sometimes isn't strict JSON; fall back to regex
+            const match = dataFt.match(/"top_level_post_id"\s*:\s*"(\d+)"/);
+            if (match?.[1]) return match[1];
+          }
+        }
+
+        // data-ftid can include a numeric post id
+        const dataFtid = element.getAttribute("data-ftid");
+        if (dataFtid) {
+          const match = dataFtid.match(/(\d{6,})/);
+          if (match?.[1]) return match[1];
+        }
+      } catch (_) {}
+
+      return null;
+    }
+
+    extractProfileNameFromElement(element) {
+      const profileEl = element.querySelector(
+        '[data-ad-rendering-role="profile_name"]'
+      );
+      if (!profileEl) return null;
+
+      const author =
+        profileEl.parentElement?.parentElement.parentElement
+          ?.nextElementSibling;
+
+      return author?.textContent?.trim() || null;
+    }
+
+    extractGroupNameFromElement(element) {
+      const groupEl = element.querySelector(
+        'a[href*="/groups/"] span, [data-ad-rendering-role="story_to"] span'
+      );
+      return groupEl?.textContent?.trim() || null;
+    }
+
+    extractPostMessageFromElement(element) {
+      const messageEl =
+        element.querySelector(
+          '[data-ad-rendering-role="story_message"], [data-ad-preview="message"], [data-ad-comet-preview="message"]'
+        ) || element.querySelector('[data-testid="post_message"]');
+      return messageEl?.textContent?.trim() || null;
+    }
+
+    generateAdAnalystId() {
+      const randomNum = Math.random().toString(36);
+      const timeSincePageLoad =
+        typeof performance !== "undefined"
+          ? performance.now().toString(36)
+          : "0";
+      const time = Date.now().toString(36);
+      return `AdAn${randomNum}${timeSincePageLoad}${time}`;
+    }
+
+    extractLandingPagesFromElement(element) {
+      if (!element) return [];
+      const anchors = Array.from(element.querySelectorAll("a[href]"));
+      const out = [];
+      for (const a of anchors) {
+        const href = a.getAttribute("href") || "";
+        if (!href) continue;
+
+        let url = href;
+        try {
+          const parsed = new URL(href, window.location.origin);
+          if (parsed.hostname.includes("l.facebook.com")) {
+            const u = parsed.searchParams.get("u");
+            if (u) url = u;
+          } else {
+            url = parsed.href;
+          }
+        } catch {
+          // keep raw href
+        }
+
+        if (typeof url === "string") {
+          out.push(url.split("#")[0]);
+        }
+      }
+      return [...new Set(out.filter(Boolean))];
+    }
+
+    extractImagesFromElement(element) {
+      if (!element) return [];
+      const images = [];
+      const imgEls = Array.from(element.querySelectorAll("img[src]"));
+      for (const img of imgEls) {
+        const src = img.getAttribute("src");
+        if (src) images.push(src);
+      }
+
+      const styled = Array.from(element.querySelectorAll("[style]"));
+      for (const el of styled) {
+        const style = el.getAttribute("style") || "";
+        const match = style.match(
+          /background-image:\s*url\((['\"]?)(.*?)\1\)/i
+        );
+        if (match && match[2]) images.push(match[2]);
+      }
+
+      return [...new Set(images.filter(Boolean))];
+    }
+
+    extractAdvertiserInfoFromElement(element, postData) {
+      const advertiser = {
+        advertiser_facebook_id: null,
+        advertiser_facebook_page: null,
+        advertiser_facebook_profile_pic: null,
+      };
+
+      advertiser.advertiser_facebook_page = postData?.author?.page || null;
+      if (postData?.author?.id) {
+        advertiser.advertiser_facebook_id = String(postData.author.id);
+      }
+      if (postData?.author?.profile_picture) {
+        advertiser.advertiser_facebook_profile_pic =
+          postData.author.profile_picture;
+      }
+
+      const profileLink = element
+        ? Array.from(element.querySelectorAll('a[role="link"][href]')).find(
+            (link) => {
+              const href = link.getAttribute("href") || "";
+              if (!href.includes("facebook.com")) return false;
+              if (href.includes("/posts/")) return false;
+              if (href.includes("/videos/")) return false;
+              if (href.includes("/photos/")) return false;
+              return true;
+            }
+          )
+        : null;
+
+      if (profileLink) {
+        const href = profileLink.getAttribute("href");
+        if (href) {
+          try {
+            advertiser.advertiser_facebook_page = new URL(
+              href,
+              window.location.origin
+            ).href;
+          } catch {
+            advertiser.advertiser_facebook_page = href;
+          }
+          const match =
+            href.match(/profile\.php\?id=(\d+)/) ||
+            href.match(/facebook\.com\/pages\/[^/]+\/(\d+)/) ||
+            href.match(/facebook\.com\/([^/?#]+)/);
+          if (match && match[1]) {
+            advertiser.advertiser_facebook_id = match[1];
+          }
+        }
+      }
+
+      const name = postData?.author?.name || null;
+      if (element && name) {
+        const img = Array.from(element.querySelectorAll("img[alt]")).find(
+          (el) => (el.getAttribute("alt") || "").includes(name)
+        );
+        if (img?.getAttribute("src")) {
+          advertiser.advertiser_facebook_profile_pic = img.getAttribute("src");
+        }
+      }
+
+      return advertiser;
+    }
+
+    extractLandingPagesFromPostData(postData) {
+      if (!postData?.ad?.ad_id) return [];
+      const urls = new Set();
+
+      if (postData?.ad?.url) urls.add(postData.ad.url);
+
+      const attachments = Array.isArray(postData?.attachments)
+        ? postData.attachments
+        : [];
+      for (const att of attachments) {
+        if (att?.destination_url) urls.add(att.destination_url);
+        if (Array.isArray(att?.action_links)) {
+          att.action_links.forEach((u) => u && urls.add(u));
+        }
+      }
+
+      return [...urls].filter(Boolean);
+    }
+
+    extractGraphqlImages(postData) {
+      const urls = new Set();
+
+      const graphqlImages = Array.isArray(postData?.images)
+        ? postData.images
+        : [];
+      for (const img of graphqlImages) {
+        if (img?.photo_image) urls.add(img.photo_image);
+        if (img?.url) urls.add(img.url);
+      }
+
+      return [...urls].filter(Boolean);
+    }
+
+    extractGraphqlVideos(postData) {
+      const out = [];
+      const graphqlVideos = Array.isArray(postData?.videos)
+        ? postData.videos
+        : [];
+      for (const vid of graphqlVideos) {
+        if (!vid) continue;
+        out.push({
+          videoId: vid.videoId || vid.id || null,
+          thumbnailImage: vid.thumbnailImage || null,
+          url: vid.url || null,
+        });
+      }
+      return out;
+    }
+
+    extractAttachmentMediaUrls(postData) {
+      const urls = new Set();
+      const attachments = Array.isArray(postData?.attachments)
+        ? postData.attachments
+        : [];
+      for (const att of attachments) {
+        if (att?.image?.flexible) urls.add(att.image.flexible);
+        if (att?.image?.large) urls.add(att.image.large);
+      }
+      return [...urls].filter(Boolean);
+    }
+
+    extractVideoInfo(postData, element) {
+      const graphqlVideo =
+        (Array.isArray(postData?.videos) && postData.videos.find((v) => v)) ||
+        null;
+      if (graphqlVideo) {
+        return {
+          video: true,
+          video_id: graphqlVideo.videoId || graphqlVideo.id || "",
+        };
+      }
+
+      const videoEl = element ? element.querySelector("video") : null;
+      return {
+        video: Boolean(videoEl),
+        video_id:
+          videoEl?.getAttribute("data-video-id") ||
+          videoEl?.getAttribute("id") ||
+          "",
+      };
+    }
+
+    isPublicPostElement(element) {
+      if (!element) return false;
+      const svgs = element.querySelectorAll("svg");
+      for (const svg of svgs) {
+        const w = parseInt(svg.getAttribute("width") || "0", 10);
+        const h = parseInt(svg.getAttribute("height") || "0", 10);
+        if (w > 20 || h > 20) continue;
+        if (svg.closest("a")) continue;
+        const paths = svg.querySelectorAll("path");
+        if (paths.length >= 3) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    buildRegisterAdPayload(postData) {
+      if (!postData) return null;
+
+      const isSponsored = Boolean(
+        postData.ad?.ad_id || postData.isSponsored || postData.sponsored
+      );
+
+      const isNewsPost = this.newsFilter?.isNewsPost
+        ? this.newsFilter.isNewsPost(postData)
+        : false;
+
+      const postId = postData.post_id || postData.id;
+      const element = this.domElementByPostId.get(postId) || null;
+      const isPublicPost = element
+        ? this.isPublicPostElement(element)
+        : !this.isPrivatePost(postData);
+
+      if (!isSponsored && !isNewsPost && !isPublicPost) return null;
+
+      const postType = isSponsored
+        ? "frontAd"
+        : isNewsPost
+        ? "newsPost"
+        : "publicPost";
+      const graphQlAdId = postData?.ad?.ad_id
+        ? String(postData.ad.ad_id)
+        : null;
+      const postIdentifier = postData.post_id || postData.id || null;
+      const htmlId =
+        postType === "publicPost"
+          ? String(
+              postIdentifier ||
+                element?.id ||
+                element?.getAttribute?.("data-pagelet") ||
+                this.generateAdAnalystId()
+            )
+          : graphQlAdId ||
+            element?.id ||
+            element?.getAttribute?.("data-pagelet") ||
+            this.generateAdAnalystId();
+
+      const visibleFraction = (() => {
+        if (!element || !this.visibilityTracker?.getVisibleState) return [];
+        const state = this.visibilityTracker.getVisibleState(element);
+        if (!state || !state.totalHeight) return [];
+        return state.visibleHeight / state.totalHeight;
+      })();
+
+      const landingPages = this.extractLandingPagesFromPostData(postData);
+      const images = this.extractGraphqlImages(postData);
+      const videos = this.extractGraphqlVideos(postData);
+      const { video, video_id } = this.extractVideoInfo(postData, element);
+      const attachment_media_urls = this.extractAttachmentMediaUrls(postData);
+
+      const advertiser = this.extractAdvertiserInfoFromElement(
+        element,
+        postData
+      );
+
+      const payload = {
+        raw_ad: element?.innerHTML || "",
+        html_ad_id: htmlId,
+        fb_id: postData.post_id || postData.id || null,
+        objId: postData.id || null,
+        visible: true,
+        visible_fraction: visibleFraction,
+        visibleDuration: Array.isArray(postData.visibleDuration)
+          ? postData.visibleDuration
+          : [],
+        timestamp: Date.now(),
+        offsetX: element
+          ? element.getBoundingClientRect().left + window.scrollX
+          : 0,
+        offsetY: element
+          ? element.getBoundingClientRect().top + window.scrollY
+          : 0,
+        type: postType,
+        images,
+        videos,
+        attachment_media_urls,
+        user_id: null,
+        clientToken:
+          postData.ad_client_token || postData.ad?.client_token || null,
+        explanationUrl: postData.explanation_url || null,
+        graphQLAsyncParams: postData.graphQLAsyncParams || null,
+        serialized_frtp_identifiers:
+          postData.serialized_frtp_identifiers || null,
+        story_debug_info: postData.story_debug_info || null,
+        advertiser_facebook_id: advertiser.advertiser_facebook_id,
+        advertiser_facebook_page: advertiser.advertiser_facebook_page,
+        advertiser_facebook_profile_pic:
+          advertiser.advertiser_facebook_profile_pic,
+        video,
+        video_id,
+      };
+
+      if (isSponsored && landingPages.length > 0) {
+        payload.landing_pages = landingPages;
+      } else {
+        payload.landing_pages = [];
+      }
+
+      if (isNewsPost) {
+        const landingDomain =
+          postData.externalDomain ||
+          (() => {
+            try {
+              const first = landingPages[0];
+              return first ? new URL(first).hostname : "";
+            } catch {
+              return "";
+            }
+          })();
+        payload.landing_domain = landingDomain;
+        payload.adanalyst_ad_id = htmlId;
+      }
+
+      if (!isNewsPost) {
+        payload.adanalyst_ad_id = htmlId;
+      }
+
+      return payload;
+    }
+
+    hashString(input) {
+      let hash = 0;
+      for (let i = 0; i < input.length; i++) {
+        const chr = input.charCodeAt(i);
+        hash = (hash << 5) - hash + chr;
+        hash |= 0;
+      }
+      return Math.abs(hash).toString(36);
+    }
+
+    preparePostForQueue(postData) {
+      const sanitized = { ...postData };
+      sanitized.isSponsored = Boolean(
+        sanitized.ad?.ad_id || sanitized.isSponsored || sanitized.sponsored
+      );
+      sanitized.messagePreview =
+        postData.message?.slice(0, 120) || sanitized.messagePreview || null;
+      sanitized.messageHash = this.hashString(postData.message || "");
+      delete sanitized.author;
+      delete sanitized.to;
+      return sanitized;
+    }
+
+    isPrivatePost(postData) {
+      const description =
+        postData?.privacy?.description || postData?.privacy_description || "";
+      return description.toLowerCase().includes("private");
+    }
+
+    queuePostForSending(postData) {
+      if (!postData) return false;
+
+      if (postData.queued) {
+        return false;
+      }
+
+      if (this.isPrivatePost(postData)) {
+        return false;
+      }
+
+      postData.queued = true;
+      if (!postData.register_ad_payload) {
+        postData.register_ad_payload = this.buildRegisterAdPayload(postData);
+      }
+      const prepared = this.preparePostForQueue(postData);
+      this.log("Queue prepared", {
+        postId: prepared.post_id || prepared.id,
+        source: prepared.source,
+        isSponsored: prepared.isSponsored,
+        adId: prepared.ad?.ad_id || null,
+      });
+      this.storageManager.addPost(prepared);
+      return true;
+    }
+
+    log(...args) {
+      if (this.config.debugMode || localStorage.getItem("CMN_DEBUG") === "1") {
+      }
     }
 
     async init() {
       if (this.initialized) return;
 
-      console.log("[CMN] Initializing all components...");
 
       try {
         // Load config
         await this.loadConfig();
 
         if (!this.config.enabled) {
-          console.log("[CMN] Extension disabled by config");
           return;
         }
 
@@ -63,14 +677,58 @@ console.log("[CMN] fbMain starting");
         this.newsFilter = new FBNewsFilter();
         this.storageManager = new FBStorageManager();
         this.storageManager.init();
+        this.visibilityTracker = new FBVisibilityTracker((visiblePostIds) =>
+          this.handlePostsVisible(visiblePostIds)
+        );
 
-        // Initialize observer
-        this.observer = new FBObserver();
+        this.bootstrapBridge = new FBBootstrapBridge((post) => {
+          const author =
+            post.author && typeof post.author === "object"
+              ? post.author
+              : post.author
+              ? { name: post.author }
+              : null;
+          const to =
+            post.to && typeof post.to === "object"
+              ? post.to
+              : post.to
+              ? { name: post.to }
+              : null;
+          const postData = {
+            ...post,
+            author,
+            to,
+            source: "bootstrap",
+            inDOM: false,
+            domFoundAt: null,
+            ad_client_token:
+              post?.ad?.client_token || post?.ad_client_token || null,
+          };
+          if (typeof postData.isSponsored !== "boolean") {
+            postData.isSponsored = Boolean(
+              postData.ad?.ad_id || postData.sponsored
+            );
+          }
 
-        // ✅ Setup bridges for all three post sources
-        this.setupGraphQLBridge(); // GraphQL XHR posts
-        this.setupBootstrapBridge(); // Bootstrap initial posts
-        this.setupDOMBridge(); // DOM verification
+          const bootstrapId = post?.post_id || post?.id || null;
+          if (bootstrapId) {
+            this.log("Bootstrap post mapped", bootstrapId);
+            this.graphqlPostsMap.set(bootstrapId, postData);
+            this.registerFingerprint(postData);
+            this.applyPendingDomMatch(postData);
+          }
+        });
+
+        this.bootstrapBridge.start();
+
+        // Initialize observer with callbacks
+        this.observer = new FBObserver(
+          (post) => this.handleDOMPost(post),
+          (post) => this.handlePostRemoved(post)
+        );
+
+        // Setup GraphQL bridge
+        this.setupGraphQLBridge();
 
         // Setup event handlers
         this.setupEventHandlers();
@@ -81,279 +739,504 @@ console.log("[CMN] fbMain starting");
         }
 
         this.initialized = true;
-        console.log("[CMN] ✅ All components initialized (3 sources active)");
-        console.log("[CMN] Sources: GraphQL XHR, Bootstrap, DOM Observer");
       } catch (error) {
-        console.error("[CMN] ❌ Initialization failed:", error);
         this.stats.errors++;
       }
     }
 
-    // ================================================================================
-    // ✅ SOURCE 1: GRAPHQL XHR BRIDGE
-    // ================================================================================
+    // ✅ Setup bridge to receive posts from injected GraphQL script
     setupGraphQLBridge() {
       window.addEventListener("CMN_POSTS_EXTRACTED", (event) => {
         const { posts } = event.detail;
 
-        console.log(`[CMN] 📡 Received ${posts.length} posts from GraphQL XHR`);
 
         posts.forEach((post) => {
-          this.handlePostFromSource(post, "graphql");
+          this.handleGraphQLPost(post);
         });
       });
 
-      console.log("[CMN] ✅ GraphQL XHR bridge listening");
     }
 
-    // ================================================================================
-    // ✅ SOURCE 2: BOOTSTRAP BRIDGE
-    // ================================================================================
-    setupBootstrapBridge() {
-      // Listen for bootstrap posts from the injected extractor
-      window.addEventListener("CMN_BOOTSTRAP_POSTS_EXTRACTED", (event) => {
-        const { posts } = event.detail;
-
-        console.log(`[CMN] 📦 Received ${posts.length} posts from Bootstrap`);
-
-        posts.forEach((post) => {
-          this.handlePostFromSource(post, "bootstrap");
-        });
-      });
-
-      // Also check if bootstrap extractor already ran
-      // (in case it finishes before this listener is set up)
-      if (window.__CMN_BOOTSTRAP_POSTS__) {
-        console.log(
-          `[CMN] 📦 Bootstrap posts already available: ${window.__CMN_BOOTSTRAP_POSTS__.length}`
-        );
-
-        window.__CMN_BOOTSTRAP_POSTS__.forEach((post) => {
-          this.handlePostFromSource(post, "bootstrap");
-        });
-      }
-
-      console.log("[CMN] ✅ Bootstrap bridge listening");
-    }
-
-    // ================================================================================
-    // ✅ SOURCE 3: DOM BRIDGE (when observer detects posts)
-    // ================================================================================
-    setupDOMBridge() {
-      // Listen for posts detected in DOM by observer
-      window.addEventListener("CMN_DOM_POST_DETECTED", (event) => {
-        const { post } = event.detail;
-
-        console.log(`[CMN] 👁️ Post detected in DOM: ${post.post_id}`);
-
-        this.handlePostFromSource(post, "dom");
-      });
-
-      console.log("[CMN] ✅ DOM bridge listening");
-    }
-
-    // ================================================================================
-    // ✅ UNIFIED HANDLER: Process posts from any source
-    // ================================================================================
-    handlePostFromSource(post, source) {
+    // ✅ FIXED: Handle GraphQL posts with proper deduplication
+    handleGraphQLPost(post) {
       try {
-        // 1. Deduplication: Check if already processed (by post_id)
-        if (this.postDetector.isProcessed(post)) {
-          console.log(
-            `[CMN] ⚠️ Post already processed: ${post.post_id} (source: ${source})`
-          );
+        this.stats.graphqlPostsReceived++;
+        this.log("GraphQL post received", post?.post_id);
+
+        const postId = post.post_id || post.id;
+        if (!postId) {
           return;
         }
 
-        // 2. Mark as processed
-        this.postDetector.markAsProcessed(post);
-
-        // 3. Check if it's a news post
-        const postForFilter = {
-          url: post.url,
-          message: post.message,
-          domain: this.extractDomain(post.url),
-        };
-
-        const isNews = this.newsFilter.isNewsPost(postForFilter);
-
-        if (!isNews) {
-          this.stats.regularPostsIgnored++;
-
-          if (this.config.debugMode) {
-            console.log(
-              `[CMN] ⏭️ Non-news post ignored from ${source}: ${post.author?.name}`
-            );
-          }
+        if (this.postDetector.isProcessedGraphQL(postId)) {
           return;
         }
 
-        // 4. It's a news post - extract category
-        const newsCategory = this.newsFilter.getDomainCategory(post.url);
+        this.postDetector.markAsProcessedGraphQL(postId);
 
-        // 5. Create unified post data object
+        const author =
+          post.author && typeof post.author === "object"
+            ? post.author
+            : post.author
+            ? { name: post.author }
+            : null;
+        const to =
+          post.to && typeof post.to === "object"
+            ? post.to
+            : post.to
+            ? { name: post.to }
+            : null;
+
         const postData = {
-          // Unique identifier
-          id: post.id || post.post_id,
-          post_id: post.post_id,
-
-          // Content
-          author: post.author?.name || post.author,
+          id: post.id || postId,
+          post_id: postId,
+          author,
+          to,
           message: post.message,
           url: post.url,
-
-          // Metadata
           creation_time: post.creation_time,
-          privacy: post.privacy_description || post.privacy,
-          isSponsored: post.isSponsored || false,
-
-          // Categorization
-          newsCategory: newsCategory,
+          privacy: post.privacy || post.privacy_description || null,
+          feedback_id: post.feedback_id || null,
+          attachments: Array.isArray(post.attachments) ? post.attachments : [],
+          attachment_count:
+            typeof post.attachment_count === "number"
+              ? post.attachment_count
+              : Array.isArray(post.attachments)
+              ? post.attachments.length
+              : 0,
+          engagment: post.engagment || {
+            reaction_count: null,
+            comment_count: null,
+            share_count: null,
+          },
+          ad: post.ad || null,
+          isSponsored: Boolean(
+            post.ad?.ad_id || post.isSponsored || post.sponsored
+          ),
           externalDomain: this.extractDomain(post.url),
-
-          // ✅ SOURCE TRACKING (critical for understanding origin)
-          source: source, // 'graphql', 'bootstrap', or 'dom'
           detectedAt: Date.now(),
-
-          // ✅ DOM VERIFICATION STATUS
-          inDOM: source === "dom" ? true : false, // Already in DOM if source is 'dom'
-          domFoundAt: source === "dom" ? Date.now() : null,
-          domCheckCompleted: source === "dom" ? true : false,
+          source: "graphql",
+          inDOM: false,
+          domFoundAt: null,
+          visibleAt: null,
+          explanationTriggeredAt: null,
+          whyAmISeeingThisData: null,
+          seenAt: null,
+          ad_explanation: post.ad_explanation || null,
+          ad_targeting_reasons: Array.isArray(post.ad_targeting_reasons)
+            ? post.ad_targeting_reasons
+            : null,
+          ad_advertisers: Array.isArray(post.advertisers)
+            ? post.advertisers
+            : null,
+          ad_client_token:
+            post.ad?.client_token || post.ad_client_token || null,
         };
 
-        // 6. Add to storage
-        this.storageManager.addPost(postData);
+        this.graphqlPostsMap.set(postId, postData);
+        this.registerFingerprint(postData);
+        this.applyPendingDomMatch(postData);
+        this.log("GraphQL post tracked", postId);
 
-        // 7. Update stats
         this.stats.newsPostsCollected++;
-
-        if (source === "graphql") {
-          this.stats.graphqlPostsReceived++;
-        } else if (source === "bootstrap") {
-          this.stats.bootstrapPostsReceived++;
-        } else if (source === "dom") {
-          this.stats.domPostsVerified++;
-        }
-
-        console.log(
-          `[CMN] ✅ News collected from ${source}: ${postData.externalDomain} (${newsCategory})`
-        );
-
-        // 8. If from GraphQL or Bootstrap, wait for DOM verification
-        if (source !== "dom") {
-          this.waitForPostInDOM(postData);
-        }
       } catch (error) {
-        console.error(`[CMN] Error handling ${source} post:`, error);
         this.stats.errors++;
       }
     }
 
-    // ================================================================================
-    // ✅ DOM VERIFICATION: Wait for post to appear in actual DOM
-    // ================================================================================
-    waitForPostInDOM(postData) {
-      const maxWaitTime = 30000; // 30 seconds
-      const checkInterval = 1000; // Check every 1 second
-      let elapsed = 0;
+    // ✅ FIXED: Handle DOM posts with safe error handling
+    // In handleDOMPost():
+    handleDOMPost(postElement) {
+      try {
+        this.stats.postsDetected++;
 
-      const checkDOM = () => {
-        // Try to find the post in DOM
-        const postElement = this.findPostInDOM(postData.post_id);
-
-        if (postElement) {
-          // ✅ Found in DOM!
-          postData.inDOM = true;
-          postData.domFoundAt = Date.now();
-          postData.domCheckCompleted = true;
-
-          console.log(
-            `[CMN] ✅ Post verified in DOM after ${elapsed}ms: ${postData.post_id}`
-          );
-
-          // Update in storage
-          this.storageManager.updatePost(postData.id, {
-            inDOM: true,
-            domFoundAt: postData.domFoundAt,
-            domCheckCompleted: true,
-          });
-
-          return; // Stop checking
+        if (this.postDetector.isProcessed(postElement)) {
+          return;
         }
 
-        elapsed += checkInterval;
+        const domMetadata = this.extractDomMetadata(postElement);
+        const domFingerprint = this.buildFingerprint(domMetadata);
+        const domPostId = domMetadata.postId;
 
-        if (elapsed < maxWaitTime) {
-          setTimeout(checkDOM, checkInterval);
+        if (!domFingerprint && !domPostId) {
+          return;
+        }
+
+        this.log("DOM fingerprint detected", domFingerprint);
+
+        const postData = {
+          author: domMetadata.authorName
+            ? { name: domMetadata.authorName }
+            : null,
+          message: domMetadata.message,
+          to: domMetadata.groupName ? { name: domMetadata.groupName } : null,
+          source: "dom",
+          detectedAt: Date.now(),
+        };
+
+        let gqlPost = null;
+        let matchedPostId = null;
+
+        if (domPostId && this.graphqlPostsMap.has(domPostId)) {
+          gqlPost = this.graphqlPostsMap.get(domPostId);
+          matchedPostId = domPostId;
         } else {
-          console.warn(
-            `[CMN] Post never verified in DOM (30s timeout): ${postData.post_id}`
-          );
+          gqlPost = this.matchGraphQLByFingerprint(domFingerprint);
+          matchedPostId = gqlPost?.post_id || gqlPost?.id || null;
 
-          postData.inDOM = false;
-          postData.domCheckCompleted = true;
+          if (!gqlPost) {
+            gqlPost = this.matchGraphQLByMessagePrefix(domMetadata);
+            matchedPostId = gqlPost?.post_id || gqlPost?.id || null;
+          }
+        }
 
-          // Still mark as checked
-          this.storageManager.updatePost(postData.id, {
-            inDOM: false,
-            domCheckCompleted: true,
+        if (gqlPost && matchedPostId) {
+          this.log("DOM matched GraphQL by fingerprint", matchedPostId);
+          gqlPost.inDOM = true;
+          gqlPost.domFoundAt = Date.now();
+          gqlPost.matchFingerprint = domFingerprint;
+          this.domElementByPostId.set(matchedPostId, postElement);
+          if (!gqlPost.message && domMetadata.message) {
+            gqlPost.message = domMetadata.message;
+          }
+          if (!gqlPost.author?.name && domMetadata.authorName) {
+            gqlPost.author = { name: domMetadata.authorName };
+          }
+          if (!gqlPost.to?.name && domMetadata.groupName) {
+            gqlPost.to = { name: domMetadata.groupName };
+          }
+
+          this.storageManager.updatePost(gqlPost.id, {
+            inDOM: true,
+            domFoundAt: gqlPost.domFoundAt,
+          });
+
+          if (this.visibilityTracker) {
+            this.visibilityTracker.track(postElement, matchedPostId);
+          }
+        } else {
+          this.log("DOM fingerprint cached for later match", domFingerprint);
+          this.pendingDomByFingerprint.set(domFingerprint, {
+            element: postElement,
+            domFoundAt: Date.now(),
+            domMetadata,
           });
         }
-      };
 
-      checkDOM();
+        this.postDetector.markAsProcessed(postElement);
+      } catch (error) {
+        this.stats.errors++;
+      }
     }
 
-    // ================================================================================
-    // ✅ DOM SEARCH: Multiple selector strategies
-    // ================================================================================
-    findPostInDOM(postId) {
-      if (!postId) return null;
+    applyPendingDomMatch(postData) {
+      const fingerprint =
+        postData.matchFingerprint ||
+        this.buildFingerprint({
+          authorName: postData.author?.name,
+          groupName: postData.to?.name,
+          message: postData.message,
+        });
+      if (!fingerprint) return;
 
-      // Try multiple selectors Facebook might use
-      const selectors = [
-        `[data-post-id="${postId}"]`,
-        `[data-ftid*="${postId}"]`,
-        `article[data-feed-item-id*="${postId}"]`,
-        `[id*="${postId}"]`,
-        `[data-deferred-id*="${postId}"]`,
-      ];
+      const pending = this.pendingDomByFingerprint.get(fingerprint);
+      if (!pending) return;
 
-      for (const selector of selectors) {
-        try {
-          const element = document.querySelector(selector);
-          if (element) {
-            return element;
-          }
-        } catch (e) {
-          console.debug("[CMN] Selector error:", selector);
-        }
+      this.pendingDomByFingerprint.delete(fingerprint);
+      postData.inDOM = true;
+      postData.domFoundAt = pending.domFoundAt;
+      if (!postData.message && pending.domMetadata?.message) {
+        postData.message = pending.domMetadata.message;
+      }
+      if (!postData.author?.name && pending.domMetadata?.authorName) {
+        postData.author = { name: pending.domMetadata.authorName };
+      }
+      if (!postData.to?.name && pending.domMetadata?.groupName) {
+        postData.to = { name: pending.domMetadata.groupName };
       }
 
-      return null;
+      this.storageManager.updatePost(postData.id, {
+        inDOM: true,
+        domFoundAt: postData.domFoundAt,
+      });
+
+      if (this.visibilityTracker) {
+        const realId = postData.post_id || postData.id;
+        this.visibilityTracker.track(pending.element, realId);
+        this.domElementByPostId.set(realId, pending.element);
+      }
+
     }
 
-    // ================================================================================
-    // ✅ UTILITY: Extract domain from URL
-    // ================================================================================
+    // Handle when posts become visible
+    handlePostsVisible(visiblePostIds) {
+      visiblePostIds.forEach((postId) => {
+        const postData = this.graphqlPostsMap.get(postId);
+
+        if (!postData) {
+          this.log("Visible post not in GraphQL map:", postId);
+          return;
+        }
+
+        if (!postData.visibleAt) {
+          const now = Math.floor(Date.now() / 1000) * 1000;
+          postData.visibleAt = now;
+          postData.seenAt = now;
+          if (!Array.isArray(postData.visibleDuration)) {
+            postData.visibleDuration = [];
+          }
+          if (postData.visibleDuration.length === 0) {
+            postData.visibleDuration.push({
+              started_ts: now,
+              end_ts: null,
+            });
+          }
+
+
+          this.storageManager.updatePost(postData.id, {
+            visibleAt: postData.visibleAt,
+            seenAt: postData.seenAt,
+            visibleDuration: postData.visibleDuration,
+          });
+
+          if (postData.isSponsored && postData.ad?.ad_id) {
+            const element = this.domElementByPostId.get(postId) || null;
+            let visibleFraction = null;
+            if (element && this.visibilityTracker?.getVisibleState) {
+              const state = this.visibilityTracker.getVisibleState(element);
+              if (state?.totalHeight) {
+                visibleFraction = state.visibleHeight / state.totalHeight;
+              }
+            }
+            const dbId = postData.dbId || null;
+            try {
+              chrome.runtime
+                .sendMessage({
+                  type: "adVisibility",
+                  dbId,
+                  adId: postData.ad.ad_id,
+                  postId,
+                  started_ts: postData.visibleAt,
+                  end_ts: null,
+                  visible_fraction: visibleFraction,
+                })
+                .catch(() => {});
+            } catch (_) {}
+          }
+
+          if (postData.isSponsored) {
+            this.triggerExplanationFetch(postData);
+          }
+
+          this.queuePostForSending(postData);
+        }
+      });
+    }
+
+    // Trigger explanation fetch
+    triggerExplanationFetch(postData) {
+      if (!this.config.explanationsEnabled) {
+        return;
+      }
+      if (postData.explanationTriggeredAt) {
+        return;
+      }
+
+      postData.explanationTriggeredAt = Date.now();
+      this.stats.explanationsTriggered++;
+
+      const postId = postData.post_id || postData.id;
+      const adId = postData?.ad?.ad_id;
+
+
+      if (!adId) {
+        return;
+      }
+
+      if (this.config.silentExplanationFetch) {
+        const fetcher = window.CMN_ExplanationFetcher;
+        if (!fetcher?.fetchExplanationViaGraphQLRequest) {
+          return;
+        }
+
+        const clientToken =
+          postData.ad_client_token || postData.ad?.client_token || null;
+
+        if (!clientToken) {
+          return;
+        }
+
+
+        const handleSilentExplanation = (explanation, meta = {}) => {
+          if (!explanation) {
+            return;
+          }
+
+          chrome.runtime.sendMessage(
+            {
+              type: "registerExplanationData",
+              payload: {
+                ad_id: adId,
+                explanation_text: explanation.explanation_text || "",
+                explanation_reasons: explanation.reasons || [],
+                advertisers: explanation.advertisers || [],
+                links: [],
+                explanation_url: null,
+                meta: {
+                  post_id: postData.post_id || null,
+                  source: postData.source,
+                  visibleAt: postData.visibleAt || null,
+                  silent: true,
+                  graphql_raw: explanation.raw || null,
+                  ...meta,
+                },
+              },
+            },
+            (resp) => {
+              if (chrome?.runtime?.lastError) {
+                return;
+              }
+              if (!resp?.ok) {
+                return;
+              }
+              this.log("Explanation registered silently", { postId, adId });
+              this.storageManager.updatePost(postData.id, {
+                explanationTriggeredAt: postData.explanationTriggeredAt,
+              });
+            }
+          );
+        };
+
+        fetcher
+          .fetchExplanationViaGraphQLRequest(adId, clientToken)
+          .then((explanation) => handleSilentExplanation(explanation))
+          .catch(async (e) => {
+            const message = e?.message || String(e || "");
+
+            if (!message.includes("doc_id_not_found")) return;
+
+            const element = this.domElementByPostId.get(postId) || null;
+            if (!element) {
+              return;
+            }
+
+            if (this.docIdPrimeAttempts.has(adId)) {
+              return;
+            }
+            this.docIdPrimeAttempts.add(adId);
+
+            if (!fetcher?.primeDocIdSilently) {
+              return;
+            }
+
+
+            const primed = await fetcher.primeDocIdSilently(element, {
+              postId,
+              adId,
+            });
+
+            if (!primed) {
+              return;
+            }
+
+            try {
+              const explanation =
+                await fetcher.fetchExplanationViaGraphQLRequest(
+                  adId,
+                  clientToken
+                );
+              handleSilentExplanation(explanation, { primed: true });
+            } catch (retryErr) {
+            }
+          });
+
+        return;
+      }
+
+      const element = this.domElementByPostId.get(postId) || null;
+      if (!element) {
+        return;
+      }
+
+      const fetcher = window.CMN_ExplanationFetcher;
+      if (!fetcher?.getExplanationUrlFromPostElement) {
+        return;
+      }
+
+      fetcher
+        .getExplanationUrlFromPostElement(element, { postId })
+        .then((explanationUrl) => {
+          if (!explanationUrl) {
+            return;
+          }
+
+          chrome.runtime.sendMessage(
+            {
+              type: "queueExplanation",
+              url: explanationUrl,
+              adId,
+              processNow: true,
+              meta: {
+                post_id: postData.post_id || null,
+                source: postData.source,
+                visibleAt: postData.visibleAt || null,
+              },
+            },
+            (resp) => {
+              if (chrome?.runtime?.lastError) {
+                return;
+              }
+              if (!resp?.ok) {
+                return;
+              }
+
+              this.log("Explanation queued", { postId, adId });
+              this.storageManager.updatePost(postData.id, {
+                explanationTriggeredAt: postData.explanationTriggeredAt,
+                explanation_url: explanationUrl,
+              });
+            }
+          );
+        })
+        .catch((e) => {
+        });
+    }
+
+    // Check if element is already fully visible
+    isElementFullyVisible(element) {
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      const viewHeight =
+        window.innerHeight || document.documentElement.clientHeight;
+      return (
+        rect.top >= 0 &&
+        rect.bottom <= viewHeight &&
+        rect.left >= 0 &&
+        rect.right <=
+          (window.innerWidth || document.documentElement.clientWidth)
+      );
+    }
+
+    // Extract domain from URL
     extractDomain(url) {
       if (!url) return null;
       try {
-        const domain = new URL(url).hostname;
-        return domain.replace("www.", "");
+        // Handle various URL formats
+        let domain = null;
+
+        // Try to extract from external URL
+        if (url.includes("facebook.com/")) {
+          // It's a Facebook URL, extract from /posts/ or /photos/
+          return null;
+        }
+
+        // It's an external URL
+        const urlObj = new URL(url);
+        domain = urlObj.hostname.replace("www.", "");
+
+        return domain;
       } catch (e) {
         return null;
-      }
-    }
-
-    logGraphQLStats() {
-      if (!this.graphqlStore) return;
-
-      console.log("[CMN] GraphQL cached posts:", this.graphqlStore.size);
-
-      for (const [id, data] of this.graphqlStore.entries()) {
-        console.log("[CMN][GraphQL POST]", id, data.creationTime);
-        break; // avoid spam
       }
     }
 
@@ -378,96 +1261,71 @@ console.log("[CMN] fbMain starting");
         this.updateConfig(config);
         sendResponse({ success: true });
       });
+
+      // Visibility tracker emits start/end windows; use the end event for ad visibility telemetry.
+      window.addEventListener("CMN_POST_VISIBILITY", (evt) => {
+        const detail = evt?.detail || {};
+        const postId = detail.postId;
+        if (!postId) return;
+
+        const postData = this.graphqlPostsMap.get(postId);
+        if (!postData || !postData.isSponsored) return;
+
+        const startedTs = detail.started_ts || postData.visibleAt || null;
+        const endTs = detail.end_ts || null;
+        if (!startedTs || !endTs) return;
+
+        if (!Array.isArray(postData.visibleDuration)) {
+          postData.visibleDuration = [];
+        }
+        const last = postData.visibleDuration[postData.visibleDuration.length - 1];
+        if (last && last.end_ts === null && last.started_ts === startedTs) {
+          last.end_ts = endTs;
+        } else {
+          postData.visibleDuration.push({ started_ts: startedTs, end_ts: endTs });
+        }
+
+        this.storageManager.updatePost(postData.id, {
+          visibleDuration: postData.visibleDuration,
+        });
+
+        const dbId = postData.dbId || null;
+        if (!dbId) return;
+
+        try {
+          chrome.runtime
+            .sendMessage({
+              type: "adVisibility",
+              dbId,
+              postId,
+              started_ts: startedTs,
+              end_ts: endTs,
+            })
+            .catch(() => {});
+        } catch (_) {}
+      });
     }
 
     start() {
       if (this.monitoring) return;
       this.monitoring = true;
+      if (this.visibilityTracker) {
+        this.visibilityTracker.start();
+      }
       this.observer.start();
-      console.log("[CMN] ✅ Monitoring started");
     }
 
     stop() {
       if (!this.monitoring) return;
       this.monitoring = false;
       this.observer.stop();
-      console.log("[CMN] ⏸️ Monitoring stopped");
-    }
-
-    handlePost(post) {
-      try {
-        console.log("[CMN] Post detected:", post);
-        this.stats.postsDetected++;
-
-        // 1. Check if already processed
-        if (this.postDetector.isProcessed(post)) {
-          return;
-        }
-
-        // 2. Generate unique ID
-        const postId = this.postDetector.generatePostId(post);
-
-        // 3. Extract all data
-        const postData = this.dataExtractor.extractPostData(post, postId);
-
-        if (!postData) {
-          this.stats.errors++;
-          return;
-        }
-
-        // 4. Check if it's news (works for both ads and organic)
-        const isNews = this.newsFilter.isNewsPost(postData);
-
-        if (isNews) {
-          // Add news category
-          postData.newsCategory = this.newsFilter.getDomainCategory(
-            postData.externalDomain
-          );
-          postData.source = "dom"; // Mark as DOM origin
-
-          // 5. Add to queue (batched sending)
-          this.storageManager.addPost(postData);
-
-          // 6. Update stats
-          if (postData.isSponsored) {
-            this.stats.adsCollected++;
-            console.log(
-              `[CMN] ✅ Sponsored news collected: ${postData.externalDomain}`
-            );
-          } else {
-            this.stats.newsPostsCollected++;
-            console.log(
-              `[CMN] ✅ Organic news collected: ${postData.externalDomain}`
-            );
-          }
-        } else {
-          this.stats.regularPostsIgnored++;
-
-          if (this.config.debugMode) {
-            console.log(
-              `[CMN] ⏭️ Non-news post ignored ${
-                postData.isSponsored ? "(ad)" : "(organic)"
-              }`
-            );
-          }
-        }
-
-        // 7. Mark as processed
-        this.postDetector.markAsProcessed(post);
-
-        // 8. Periodic cache cleanup
-        if (this.stats.postsDetected % 100 === 0) {
-          this.postDetector.clearCache();
-        }
-      } catch (error) {
-        console.error("[CMN] Error handling post:", error);
-        this.stats.errors++;
+      if (this.visibilityTracker) {
+        this.visibilityTracker.stop();
       }
     }
 
     handlePostRemoved(post) {
       if (this.config.debugMode) {
-        console.log("[CMN] Post removed from DOM");
       }
     }
 
@@ -476,10 +1334,8 @@ console.log("[CMN] fbMain starting");
         const result = await chrome.storage.local.get(["cmn_config"]);
         if (result.cmn_config) {
           this.config = { ...this.config, ...result.cmn_config };
-          console.log("[CMN] Config loaded:", this.config);
         }
       } catch (error) {
-        console.error("[CMN] Error loading config:", error);
       }
     }
 
@@ -488,9 +1344,7 @@ console.log("[CMN] fbMain starting");
 
       try {
         await chrome.storage.local.set({ cmn_config: this.config });
-        console.log("[CMN] Config updated:", this.config);
       } catch (error) {
-        console.error("[CMN] Error saving config:", error);
       }
     }
 
@@ -503,20 +1357,20 @@ console.log("[CMN] fbMain starting");
         observerStats: this.observer?.getStatus?.() || {},
         detectorStats: this.postDetector?.getStats() || {},
         extractorStats: this.dataExtractor?.getStats() || {},
+        graphqlPostsTracked: this.graphqlPostsMap.size,
+        domPostsInProcess: this.domPostsInProcess.size,
+        visibilityTrackerStats: this.visibilityTracker?.getStats?.() || {},
       };
     }
 
     destroy() {
-      console.log("[CMN] Cleaning up...");
       this.stop();
       if (this.storageManager) {
         this.storageManager.destroy();
       }
-      if (this.graphqlInterceptor) {
-        this.graphqlInterceptor.stop();
+      if (this.visibilityTracker) {
+        this.visibilityTracker.stop();
       }
-
-      console.log("[CMN] Cleanup complete");
     }
   }
 
@@ -528,8 +1382,6 @@ console.log("[CMN] fbMain starting");
   } else {
     main.init();
   }
-
-  // Cleanup on unload
 
   // Expose for debugging
   window.CMN = main;

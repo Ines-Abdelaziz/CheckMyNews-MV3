@@ -3,6 +3,8 @@
 
 import { offscreenRequest } from "./utils/domparser.js";
 import { lsGet, lsSet } from "./utils/storage.js";
+import { replaceUserIdEmail } from "./utils/errors.js";
+import "../third-party/sha512.min.js";
 
 const PREF_LAST_CRAWL_KEY = "preferences_last_crawl";
 const PREF_SNAPSHOT_KEY = "preferences_snapshot";
@@ -35,7 +37,6 @@ export async function initPreferencesSystem(state, URLS_SERVER) {
     });
   }
 
-  console.log("[PREFERENCES] System initialized.");
 }
 
 // ------------------------------------------------------
@@ -49,7 +50,6 @@ export async function crawlPreferences(
 ) {
   const userId = state.CURRENT_USER_ID;
   if (!userId) {
-    console.log("[PREFERENCES] No CURRENT_USER_ID, skipping crawl.");
     return;
   }
 
@@ -61,7 +61,6 @@ export async function crawlPreferences(
     return;
   }
 
-  console.log("[PREFERENCES] Crawling Facebook ad preferences…");
 
   try {
     // 1) Fetch HTML for interests and advertisers pages
@@ -86,9 +85,6 @@ export async function crawlPreferences(
       if (res && Array.isArray(res.interests)) {
         interestsParsed = res;
       } else {
-        console.warn(
-          "[PREFERENCES] Interests parsing unavailable (offscreen unsupported or FB change)"
-        );
       }
     }
 
@@ -105,9 +101,6 @@ export async function crawlPreferences(
           hidden_advertisers: res.hidden_advertisers || [],
         };
       } else {
-        console.warn(
-          "[PREFERENCES] Advertisers parsing unavailable (offscreen unsupported or FB change)"
-        );
       }
     }
 
@@ -130,9 +123,7 @@ export async function crawlPreferences(
     // 4) Send to backend
     await sendPreferencesToServer(userId, snapshot, URLS_SERVER);
 
-    console.log("[PREFERENCES] Crawl completed.");
   } catch (e) {
-    console.error("[PREFERENCES] crawlPreferences error:", e);
   }
 }
 
@@ -153,6 +144,15 @@ export async function getPreferencesSnapshot() {
 // ------------------------------------------------------
 // Helpers
 // ------------------------------------------------------
+const hashFn =
+  typeof globalThis?.sha512 === "function"
+    ? globalThis.sha512
+    : globalThis?.sha512?.sha512?.bind(globalThis.sha512) ||
+      globalThis?.sha512?.sha512_384?.bind(globalThis.sha512);
+
+function hashPayload(payload) {
+  return replaceUserIdEmail(payload, hashFn);
+}
 
 async function fetchHtml(url) {
   try {
@@ -165,12 +165,10 @@ async function fetchHtml(url) {
       },
     });
     if (!resp.ok) {
-      console.warn("[PREFERENCES] Fetch failed:", url, resp.status);
       return null;
     }
     return await resp.text();
   } catch (e) {
-    console.warn("[PREFERENCES] fetchHtml error:", url, e);
     return null;
   }
 }
@@ -183,29 +181,27 @@ async function sendPreferencesToServer(userId, snap, URLS_SERVER) {
 
   // Interests
   if (snap.interests.length > 0 && URLS_SERVER.registerInterests) {
-    const payloadInterests = {
+    const payloadInterests = hashPayload({
       ...basePayload,
       interests: snap.interests,
-    };
+    });
     try {
       await postJSON(URLS_SERVER.registerInterests, payloadInterests);
     } catch (e) {
-      console.warn("[PREFERENCES] registerInterests failed:", e);
     }
   }
 
   // Advertisers
   if (URLS_SERVER.registerAdvertisers) {
-    const payloadAdv = {
+    const payloadAdv = hashPayload({
       ...basePayload,
       advertisers_with_contact: snap.advertisers_with_contact,
       advertisers_targeting_you: snap.advertisers_targeting_you,
       hidden_advertisers: snap.hidden_advertisers,
-    };
+    });
     try {
       await postJSON(URLS_SERVER.registerAdvertisers, payloadAdv);
     } catch (e) {
-      console.warn("[PREFERENCES] registerAdvertisers failed:", e);
     }
   }
 }

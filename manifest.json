@@ -13,6 +13,8 @@
     "cookies",
     "activeTab",
     "scripting",
+    "offscreen",
+    "notifications",
     "alarms",
     "declarativeNetRequest",
     "declarativeNetRequestFeedback"
@@ -45,6 +47,8 @@
       "matches": ["*://*.facebook.com/*"],
       "js": [
         "content-scripts/fbBootstrapBridge.js",
+        "content-scripts/injectBootstrapExtractor.js",
+        "content-scripts/injectGraphQLInterceptor.js",
         "content-scripts/feedAds.js",
         "content-scripts/fbObserver.js",
         "content-scripts/fbPostDetector.js",
@@ -52,9 +56,11 @@
         "content-scripts/fbNewsFilter.js",
         "content-scripts/fbStorageManager.js",
         "content-scripts/fbMessageHandler.js",
+        "content-scripts/fbUserDetector.js",
+        "content-scripts/visibility-tracker.js",
+        "content-scripts/explanation-fetcher.js",
         "content-scripts/fbMain.js",
-        "content-scripts/injectGraphQLInterceptor.js",
-        "content-scripts/injectBootstrapExtractor.js"
+        "content-scripts/interaction-tracker.js"
       ],
       "run_at": "document_start"
     }

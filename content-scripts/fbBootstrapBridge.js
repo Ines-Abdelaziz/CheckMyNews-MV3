@@ -1,4 +1,3 @@
-console.log("[CMN][BOOTSTRAP] Bridge loaded");
 
 class FBBootstrapBridge {
   constructor(onPost) {
@@ -17,8 +16,12 @@ class FBBootstrapBridge {
   handleMessage(event) {
     if (event.source !== window) return;
     if (event.data?.source !== "CMN_BOOTSTRAP") return;
-
-    this.onPost(event.data.payload);
+    const payload = event.data.payload;
+    if (Array.isArray(payload)) {
+      payload.forEach((post) => this.onPost(post));
+      return;
+    }
+    this.onPost(payload);
   }
 }
 

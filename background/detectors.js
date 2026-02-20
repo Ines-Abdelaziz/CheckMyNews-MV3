@@ -78,11 +78,9 @@ async function sendNewVersionDetected(state, userId, URLS_SERVER, sha512) {
   });
 
   if (!resp || resp.status === "FAILURE") {
-    console.log(" Failed to notify new FB interface for user", userId);
     return;
   }
 
-  console.log("🎉 New Facebook interface detected for user:", userId);
   await addUserToNewInterfaceSent(userId);
 }
 // ------------------------------------------------------
@@ -93,7 +91,6 @@ export async function handleUiDetectionMessage(message, state, URLS_SERVER) {
   const userId = state.CURRENT_USER_ID;
 
   if (!version || !userId) {
-    console.warn("[Detectors] Invalid ui-detection message", message);
     return;
   }
   const normalized = normalizeVersion(version);
@@ -124,7 +121,6 @@ export function detectInterfaceVersionFromDoc(doc) {
 
 // ------------------------------------------------------
 export async function initDetectors(state) {
-  console.log("[Detectors] Initializing…");
   await ensureMapsExist();
   return true;
 }

@@ -55,7 +55,6 @@ export async function updateCurrentUser(state) {
 
     return userId;
   } catch (e) {
-    console.log(" updateCurrentUser error:", e);
     state.CURRENT_USER_ID = null;
     state.LOGGED_IN = false;
     return null;
@@ -66,7 +65,6 @@ export async function updateCurrentUser(state) {
 // Helper to retrieve stored user ID on startup
 // ------------------------------------------------------
 export async function initUserSystem(state) {
-  console.log("Initializing user identification system…");
 
   const storedId = await lsGet("CURRENT_USER_ID", null);
   if (storedId) {

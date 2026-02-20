@@ -19,9 +19,6 @@ export async function initInterfaceVersionDetection(state) {
 
   state.FACEBOOK_MOBILE = (await lsGet(MOBILE_FLAG_KEY)) || false;
 
-  console.log(
-    `[UI-DETECT] Loaded UI version: ${state.FACEBOOK_UI_VERSION}, mobile=${state.FACEBOOK_MOBILE}`
-  );
 }
 
 /**
@@ -31,7 +28,6 @@ export async function setInterfaceVersion(version, mobile = false) {
   await lsSet(UI_VERSION_KEY, version);
   await lsSet(MOBILE_FLAG_KEY, !!mobile);
 
-  console.log(`[UI-DETECT] UI updated → ${version}, mobile=${mobile}`);
 
   // Notify popup/components
   chrome.runtime.sendMessage({

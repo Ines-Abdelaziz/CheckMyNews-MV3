@@ -2,6 +2,8 @@
 // Modern MV3 consent management for CheckMyNews
 
 import { lsGet, lsSet } from "./utils/storage.js";
+import { replaceUserIdEmail } from "./utils/errors.js";
+import "../third-party/sha512.min.js";
 
 /**
  * Storage keys
@@ -10,7 +12,7 @@ const CONSENTS_KEY = (uid) => `${uid}_consents`;
 const CONSENT_LAST_CHECK_KEY = (uid) => `${uid}_consent_last_check`;
 const CONSENT_PAGE_OPENED_KEY = "consent_page_opened";
 
-const CONSENT_CHECK_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
+const CONSENT_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes (MV2 parity)
 
 /**
  * Initialize consent state (called once)
@@ -25,7 +27,6 @@ export async function initConsentSystem(state, URLS_SERVER) {
   const lastCheck = await lsGet(CONSENT_LAST_CHECK_KEY(uid));
   if (!lastCheck) await lsSet(CONSENT_LAST_CHECK_KEY(uid), 0);
 
-  console.log("[CONSENT] Initialized.");
 }
 
 /**
@@ -42,7 +43,6 @@ export async function hasConsent(userId, mode = 0) {
     if (mode === 0) return Object.values(obj).some((x) => x === true);
     return obj[mode] === true;
   } catch (e) {
-    console.warn("[CONSENT] Could not parse stored consents", e);
     return false;
   }
 }
@@ -63,27 +63,28 @@ export async function refreshConsentFromServer(
 
   if (!force && now - lastCheck < CONSENT_CHECK_INTERVAL) return;
 
-  console.log("[CONSENT] Refreshing consent from server…");
 
   try {
-    const resp = await fetch(URLS_SERVER.getConsent, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: uid }),
+    const payload = hashPayload({
+      user_id: uid,
+      timestamp: now,
     });
-
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-    const data = await resp.json();
+    const data = await postForm(URLS_SERVER.getConsent, {
+      user_id: payload.user_id,
+      is_hashed: true,
+    });
+    if (!data || typeof data.consents === "undefined") {
+      await lsSet(CONSENTS_KEY(uid), "{}");
+      await lsSet(CONSENT_LAST_CHECK_KEY(uid), now);
+      return false;
+    }
 
     await lsSet(CONSENTS_KEY(uid), JSON.stringify(data.consents || {}));
     await lsSet(CONSENT_LAST_CHECK_KEY(uid), now);
 
     notifyConsentChange(data.consents || {});
-    console.log("[CONSENT] Updated:", data.consents);
     return true;
   } catch (e) {
-    console.error("[CONSENT] refreshConsentFromServer failed:", e);
     return false;
   }
 }
@@ -139,31 +140,35 @@ export async function registerConsent(state, URLS_SERVER, consentPayload) {
   if (!uid) return false;
 
   try {
-    const payload = {
-      user_id: Number(uid),
-      ...consentPayload,
+    const manifest = chrome.runtime.getManifest();
+    const payload = hashPayload({
+      user_id: uid,
+      extension_version: manifest?.version || "unknown",
       timestamp: Date.now(),
-    };
-
-    const res = await fetch(URLS_SERVER.registerConsent, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
     });
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const out = await res.json();
+    const out = await postForm(URLS_SERVER.registerConsent, {
+      user_id: payload.user_id,
+      extension_version: payload.extension_version,
+      is_hashed: true,
+    });
+    const status = String(out?.status || "").toLowerCase();
+    if (status === "failure" || typeof out?.consents === "undefined") {
+      await lsSet(CONSENTS_KEY(uid), "{}");
+      return {
+        ok: false,
+        error: out?.reason || "register_consent_failed",
+        currentUser: uid,
+      };
+    }
 
     if (out.consents) {
       await lsSet(CONSENTS_KEY(uid), JSON.stringify(out.consents));
       notifyConsentChange(out.consents);
     }
 
-    console.log("[CONSENT] Consent registered:", out);
     return { ok: true, consents: out.consents, currentUser: uid };
   } catch (e) {
-    console.error("[CONSENT] registerConsent error:", e);
     return { ok: false };
   }
 }
@@ -180,10 +185,15 @@ export async function openConsentPage() {
  * Notify UI
  */
 async function notifyConsentChange(consents) {
-  chrome.runtime.sendMessage({
-    type: "consentUpdated",
-    consents,
-  });
+  try {
+    const maybePromise = chrome.runtime.sendMessage({
+      type: "consentUpdated",
+      consents,
+    });
+    if (maybePromise && typeof maybePromise.catch === "function") {
+      maybePromise.catch(() => {});
+    }
+  } catch (_) {}
 }
 
 /**
@@ -191,4 +201,31 @@ async function notifyConsentChange(consents) {
  */
 export async function periodicConsentCheck(state, URLS_SERVER) {
   await refreshConsentFromServer(state, URLS_SERVER, false);
+}
+
+const hashFn =
+  typeof globalThis?.sha512 === "function"
+    ? globalThis.sha512
+    : globalThis?.sha512?.sha512?.bind(globalThis.sha512) ||
+      globalThis?.sha512?.sha512_384?.bind(globalThis.sha512);
+
+function hashPayload(payload) {
+  return replaceUserIdEmail(payload, hashFn);
+}
+
+async function postForm(url, payload) {
+  const body = new URLSearchParams();
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (value === undefined || value === null) continue;
+    body.set(key, String(value));
+  }
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
 }

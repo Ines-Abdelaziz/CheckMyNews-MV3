@@ -1,5 +1,4 @@
 // content-scripts/fbNewsFilter.js
-console.log("[CMN] fbNewsFilter loaded");
 
 class FBNewsFilter {
   constructor() {
@@ -96,7 +95,6 @@ class FBNewsFilter {
     if (!this.customDomains.includes(normalized)) {
       this.customDomains.push(normalized);
       this.newsDomains.push(normalized);
-      console.log(`[CMN] Added custom domain: ${normalized}`);
     }
   }
 
@@ -110,7 +108,6 @@ class FBNewsFilter {
       if (newsIndex > -1) {
         this.newsDomains.splice(newsIndex, 1);
       }
-      console.log(`[CMN] Removed custom domain: ${normalized}`);
     }
   }
 

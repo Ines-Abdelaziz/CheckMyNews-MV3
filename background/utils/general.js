@@ -34,7 +34,6 @@ export function genericRequestSuccess() {
 }
 
 export function genericRequestError() {
-  console.log("Request failed");
   return;
 }
 

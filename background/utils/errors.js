@@ -132,13 +132,10 @@ export async function sendErrorMessage(state, errorInfo, errorURL, sha512) {
     });
 
     if (!res || res.status === "FAILURE") {
-      console.log("❌ Failed to register error:", errorInfo);
       return true;
     }
 
-    console.log("✅ Error registered:", errorInfo);
   } catch (e) {
-    console.log("❌ Error sending failed:", e);
   }
 }
 
@@ -172,7 +169,12 @@ export function captureErrorContentScript(targetFunction, args, returnError) {
     errorInfo[MSG_TYPE] = ERROR_TYPES.CONTENT_SCRIPT_ERROR;
     errorInfo[ERROR_MESSAGE] = constructErrorMsg(targetFunction, error);
 
-    chrome.runtime.sendMessage(errorInfo);
+    try {
+      const maybePromise = chrome.runtime.sendMessage(errorInfo);
+      if (maybePromise && typeof maybePromise.catch === "function") {
+        maybePromise.catch(() => {});
+      }
+    } catch (_) {}
     return returnError;
   }
 }
@@ -189,7 +191,12 @@ export function captureErrorContentScriptTest() {
       error
     );
 
-    chrome.runtime.sendMessage(errorInfo);
+    try {
+      const maybePromise = chrome.runtime.sendMessage(errorInfo);
+      if (maybePromise && typeof maybePromise.catch === "function") {
+        maybePromise.catch(() => {});
+      }
+    } catch (_) {}
   }
 }
 

@@ -3,6 +3,8 @@
 
 import { offscreenRequest } from "./utils/domparser.js";
 import { lsGet, lsSet } from "./utils/storage.js";
+import { replaceUserIdEmail } from "./utils/errors.js";
+import "../third-party/sha512.min.js";
 
 // Keys for storage
 const QUEUE_KEY = "explanations_queue";
@@ -21,7 +23,6 @@ export async function initExplanationsSystem(state, URLS_SERVER) {
   if (!q) await lsSet(QUEUE_KEY, []);
   if (!c) await lsSet(CRAWLED_KEY, []);
 
-  console.log("[EXPLANATIONS] System initialized.");
 }
 
 // ------------------------------------------------------
@@ -47,7 +48,6 @@ export async function queueExplanation(explanationUrl, adId, meta = {}) {
   });
 
   await lsSet(QUEUE_KEY, queue);
-  console.log("[EXPLANATIONS] Queued:", explanationUrl);
 }
 
 // ------------------------------------------------------
@@ -77,7 +77,7 @@ async function processOneExplanation(state, URLS_SERVER, item) {
     // - parsed.links
     // (depending on how we’ll implement parseExplanationHtml in offscreen.js)
 
-    const payload = {
+    const payload = hashPayload({
       user_id: state.CURRENT_USER_ID,
       ad_id: adId,
       explanation_url: url,
@@ -87,7 +87,7 @@ async function processOneExplanation(state, URLS_SERVER, item) {
       links: parsed?.links || [],
       meta,
       timestamp: Date.now(),
-    };
+    });
 
     // 3) Send to backend
     const res = await fetch(URLS_SERVER.registerExplanation, {
@@ -100,7 +100,6 @@ async function processOneExplanation(state, URLS_SERVER, item) {
 
     return true;
   } catch (e) {
-    console.error("[EXPLANATIONS] Error processing explanation:", url, e);
     return false;
   }
 }
@@ -118,11 +117,6 @@ export async function processExplanationsQueue(state, URLS_SERVER) {
     return;
   }
 
-  console.log(
-    `[EXPLANATIONS] Processing ${Math.min(BATCH_SIZE, queue.length)}/${
-      queue.length
-    } items…`
-  );
 
   const batch = queue.slice(0, BATCH_SIZE);
   const successes = [];
@@ -147,7 +141,51 @@ export async function processExplanationsQueue(state, URLS_SERVER) {
   ];
   await lsSet(CRAWLED_KEY, newCrawled);
 
-  console.log(
-    `[EXPLANATIONS] Done. Success=${successes.length}, Remaining=${remaining.length}`
-  );
+}
+
+// ------------------------------------------------------
+// Register explanation directly (no offscreen parsing)
+// Used for silent GraphQL-derived explanations
+// ------------------------------------------------------
+export async function registerExplanationData(state, URLS_SERVER, data = {}) {
+  const adId = data.ad_id || data.adId;
+  if (!adId) {
+    return { ok: false, error: "missing_ad_id" };
+  }
+
+  try {
+    const payload = hashPayload({
+      user_id: state.CURRENT_USER_ID,
+      ad_id: adId,
+      explanation_url: data.explanation_url || "",
+      explanation_text: data.explanation_text || "",
+      explanation_reasons: data.explanation_reasons || [],
+      advertisers: data.advertisers || [],
+      links: data.links || [],
+      meta: data.meta || {},
+      timestamp: Date.now(),
+    });
+
+    const res = await fetch(URLS_SERVER.registerExplanation, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+const hashFn =
+  typeof globalThis?.sha512 === "function"
+    ? globalThis.sha512
+    : globalThis?.sha512?.sha512?.bind(globalThis.sha512) ||
+      globalThis?.sha512?.sha512_384?.bind(globalThis.sha512);
+
+function hashPayload(payload) {
+  return replaceUserIdEmail(payload, hashFn);
 }

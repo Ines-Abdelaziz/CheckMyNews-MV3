@@ -1,6 +1,5 @@
 // page-scripts/fbBootstrapExtractor.page.js
 // PAGE CONTEXT
-console.log("[CMN][BOOTSTRAP][PAGE] loaded");
 
 class FBBootstrapExtractor {
   constructor() {
@@ -132,12 +131,48 @@ class FBBootstrapExtractor {
         storyNode.comet_sections.context_layout.story.comet_sections
           ?.metadata[1]?.story.privacy_scope ||
         null,
+      is_attachment:
+        Array.isArray(storyNode.attachments) &&
+        storyNode.attachments.length > 0,
       attachments: [],
+      images: [], // To be filled from attachments
+      videos: [], // To be filled from attachments
+
       to: null,
+      ad: null,
+      engagment: {
+        reaction_count:
+          storyNode.comet_sections.feedback?.story.story_ufi_container.story
+            .feedback_context.feedback_target_with_context
+            .comet_ufi_summary_and_actions_renderer.feedback.reaction_count
+            .count || null,
+        comment_count:
+          storyNode.comet_sections.feedback?.story.story_ufi_container.story
+            .feedback_context.feedback_target_with_context
+            .comet_ufi_summary_and_actions_renderer.feedback
+            ?.comment_rendering_instance?.comments?.total_count || null,
+        share_count:
+          storyNode.comet_sections.feedback?.story.story_ufi_container.story
+            .feedback_context.feedback_target_with_context
+            .comet_ufi_summary_and_actions_renderer.feedback.share_count
+            .count || null,
+      },
     };
+
+    // Extract ad information if present
+    if (storyNode.th_dat_spo) {
+      post.ad = {
+        ad_id: storyNode.th_dat_spo.lbl_adv_iden || null,
+        client_token: storyNode.th_dat_spo.client_token || null,
+        url: storyNode.comet_sections.content.story.attachments[0].styles
+          .attachment?.story_attachment_link_renderer?.attachment?.url,
+      };
+    }
     // --- Extract attachments (ads & link cards) ---
     if (Array.isArray(storyNode.attachments)) {
       post.attachments = storyNode.attachments.map((att) => {
+        const med = att.media;
+        const type = med?.__typename;
         const style = att.styles;
         const attachment = style?.attachment;
         const media = attachment?.media;
@@ -145,7 +180,8 @@ class FBBootstrapExtractor {
         const webLink = linkRenderer?.attachment?.web_link;
 
         return {
-          renderer_type: style?.__typename || null,
+          type: type || null,
+          id: med?.id || null,
 
           image: {
             flexible: media?.flexible_height_share_image?.uri || null,
@@ -166,6 +202,40 @@ class FBBootstrapExtractor {
 
       post.attachment_count = post.attachments.length;
     }
+    if (Array.isArray(storyNode.attachments)) {
+      post.images = storyNode.attachments
+        .map((att) => {
+          const media = att.media;
+          const type = media?.__typename;
+          const mediaa = att.styles?.attachment?.media;
+          if (type === "Photo") {
+            return {
+              id: mediaa?.id || null,
+              photo_image: mediaa?.photo_image?.uri || null,
+              height: mediaa?.photo_image?.height || null,
+              width: mediaa?.photo_image?.width || null,
+              url: mediaa?.url || null,
+            };
+          }
+          return null;
+        })
+        .filter(Boolean);
+
+      post.videos = storyNode.attachments
+        .map((att) => {
+          const type = att.media?.__typename;
+          const mediaa = att.styles?.attachment?.media;
+          if (type === "Video") {
+            return {
+              videoId: mediaa?.videoId || null,
+              thumbnailImage: mediaa?.thumbnailImage?.uri || null,
+              url: mediaa?.url || null,
+            };
+          }
+          return null;
+        })
+        .filter(Boolean);
+    }
 
     // Extract author information
     if (storyNode.actors && storyNode.actors.length > 0) {
@@ -173,8 +243,14 @@ class FBBootstrapExtractor {
       post.author = {
         name: actor.name,
         id: actor.id,
+        page: actor.url,
         type: actor.__typename,
-        profile_picture: actor.profile_picture?.uri,
+        profile_picture:
+          storyNode.comet_sections?.header?.story?.comet_sections?.actor_photo
+            ?.story?.actors?.[0]?.profile_picture?.uri ||
+          storyNode.comet_sections?.context_layout?.story?.comet_sections
+            ?.actor_photo?.story?.actors?.[0]?.profile_picture?.uri ||
+          null,
       };
     }
 
@@ -239,12 +315,6 @@ class FBBootstrapExtractor {
       // Privacy extraction failed
     }
 
-    // Extract attachments
-    if (storyNode.attachments && Array.isArray(storyNode.attachments)) {
-      post.attachments = storyNode.attachments;
-      post.attachment_count = storyNode.attachments.length;
-    }
-
     return post;
   }
 
@@ -284,7 +354,16 @@ class FBBootstrapExtractor {
 
     // Start recursive search
     findStories(jsonData);
-    console.log("[CMN][BOOTSTRAP] Extracted posts:", posts);
+    // Send to content script
+    if (posts.length > 0) {
+      window.postMessage(
+        {
+          source: "CMN_BOOTSTRAP",
+          payload: posts,
+        },
+        "*"
+      );
+    }
     return posts;
   }
 

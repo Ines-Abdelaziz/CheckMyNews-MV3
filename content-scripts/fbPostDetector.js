@@ -1,15 +1,21 @@
-// content-scripts/fbPostDetector.js
-console.log("[CMN] fbPostDetector loaded");
+// content-scripts/fbPostDetector.js - FIXED VERSION
 
 class FBPostDetector {
   constructor() {
     this.processedPosts = new Set();
+    this.processedGraphQLPosts = new Set(); // ✅ NEW: Separate set for GraphQL posts
     this.postIdCounter = 0;
   }
 
-  // Check if post has already been processed
+  // Check if post has already been processed (DOM element)
   isProcessed(postElement) {
-    if (postElement.dataset.cmnProcessed === "true") {
+    // ✅ FIX: Check if postElement exists and has dataset
+    if (!postElement) {
+      return false;
+    }
+
+    // If it's a DOM element with dataset
+    if (postElement.dataset && postElement.dataset.cmnProcessed === "true") {
       return true;
     }
 
@@ -17,27 +23,52 @@ class FBPostDetector {
     return this.processedPosts.has(postId);
   }
 
-  // Mark post as processed
+  // Check if GraphQL post has been processed
+  isProcessedGraphQL(postId) {
+    if (!postId) return false;
+    return this.processedGraphQLPosts.has(postId);
+  }
+
+  // Mark post as processed (DOM element)
   markAsProcessed(postElement) {
-    postElement.dataset.cmnProcessed = "true";
+    // ✅ FIX: Check if postElement exists before accessing dataset
+    if (!postElement) {
+      return;
+    }
+
+    if (postElement.dataset) {
+      postElement.dataset.cmnProcessed = "true";
+    }
+
     const postId = this.generatePostId(postElement);
     this.processedPosts.add(postId);
   }
 
+  // Mark GraphQL post as processed
+  markAsProcessedGraphQL(postId) {
+    if (!postId) return;
+    this.processedGraphQLPosts.add(postId);
+  }
+
   // Generate unique post ID
   generatePostId(element) {
+    // ✅ FIX: Handle null/undefined element
+    if (!element) {
+      return `post_${Date.now()}_${this.postIdCounter++}`;
+    }
+
     // Try to get ID from element attributes
-    const pageletId = element.getAttribute("data-pagelet");
+    const pageletId = element.getAttribute?.("data-pagelet");
     if (pageletId) return pageletId;
 
-    const ariaLabel = element.getAttribute("aria-labelledby");
+    const ariaLabel = element.getAttribute?.("aria-labelledby");
     if (ariaLabel) return ariaLabel;
 
-    const elementId = element.getAttribute("id");
+    const elementId = element.getAttribute?.("id");
     if (elementId) return elementId;
 
     // Fallback: generate from position and content
-    const textContent = element.textContent.substring(0, 50);
+    const textContent = element.textContent?.substring(0, 50) || "";
     const hash = this.hashCode(textContent);
     return `post_${hash}_${this.postIdCounter++}`;
   }
@@ -71,25 +102,27 @@ class FBPostDetector {
 
   // Get post type
   getPostType(element) {
+    if (!element) return "unknown";
+
     // Check for video
-    if (element.querySelector("video")) {
+    if (element.querySelector?.("video")) {
       return "video";
     }
 
     // Check for image
-    if (element.querySelector('img[src*="scontent"]')) {
+    if (element.querySelector?.('img[src*="scontent"]')) {
       return "photo";
     }
 
     // Check for shared link
-    if (element.querySelector('a[href*="l.facebook.com"]')) {
+    if (element.querySelector?.('a[href*="l.facebook.com"]')) {
       return "shared_link";
     }
 
     // Check for live video
     if (
-      element.textContent.includes("Live") &&
-      element.querySelector("video")
+      element.textContent?.includes("Live") &&
+      element.querySelector?.("video")
     ) {
       return "live";
     }
@@ -99,8 +132,10 @@ class FBPostDetector {
 
   // Check if post is sponsored
   isSponsored(element) {
+    if (!element) return false;
+
     // Check for sponsored text
-    const text = element.textContent.toLowerCase();
+    const text = element.textContent?.toLowerCase() || "";
     const sponsoredKeywords = [
       "sponsored",
       "спонсируется",
@@ -114,17 +149,19 @@ class FBPostDetector {
     }
 
     // Check for sponsored aria-label
-    const sponsoredLabel = element.querySelector('[aria-label*="Sponsored"]');
+    const sponsoredLabel = element.querySelector?.('[aria-label*="Sponsored"]');
     if (sponsoredLabel) return true;
 
     // Check for data attributes
-    if (element.hasAttribute("data-is-sponsored")) return true;
+    if (element.hasAttribute?.("data-is-sponsored")) return true;
 
     return false;
   }
 
   // Get post timestamp
   getPostTimestamp(element) {
+    if (!element) return Date.now();
+
     // Try to find timestamp element
     const timestampSelectors = [
       "abbr[data-utime]",
@@ -135,17 +172,22 @@ class FBPostDetector {
     ];
 
     for (const selector of timestampSelectors) {
-      const timestampEl = element.querySelector(selector);
-      if (timestampEl) {
-        const utime = timestampEl.getAttribute("data-utime");
-        if (utime) {
-          return parseInt(utime) * 1000; // Convert to ms
-        }
+      try {
+        const timestampEl = element.querySelector?.(selector);
+        if (timestampEl) {
+          const utime = timestampEl.getAttribute?.("data-utime");
+          if (utime) {
+            return parseInt(utime) * 1000; // Convert to ms
+          }
 
-        const timestamp = timestampEl.getAttribute("data-timestamp");
-        if (timestamp) {
-          return parseInt(timestamp);
+          const timestamp = timestampEl.getAttribute?.("data-timestamp");
+          if (timestamp) {
+            return parseInt(timestamp);
+          }
         }
+      } catch (e) {
+        // Skip invalid selector
+        continue;
       }
     }
 
@@ -155,6 +197,8 @@ class FBPostDetector {
 
   // Get post URL
   getPostUrl(element) {
+    if (!element) return null;
+
     // Look for permalink
     const permalinkSelectors = [
       'a[href*="/posts/"]',
@@ -164,9 +208,14 @@ class FBPostDetector {
     ];
 
     for (const selector of permalinkSelectors) {
-      const link = element.querySelector(selector);
-      if (link && link.href) {
-        return link.href.split("?")[0]; // Remove query params
+      try {
+        const link = element.querySelector?.(selector);
+        if (link?.href) {
+          return link.href.split("?")[0]; // Remove query params
+        }
+      } catch (e) {
+        // Skip invalid selector
+        continue;
       }
     }
 
@@ -179,7 +228,11 @@ class FBPostDetector {
     if (this.processedPosts.size > maxCacheSize) {
       const toKeep = Array.from(this.processedPosts).slice(-500);
       this.processedPosts = new Set(toKeep);
-      console.log("[CMN] Post cache cleared");
+    }
+
+    if (this.processedGraphQLPosts.size > maxCacheSize) {
+      const toKeep = Array.from(this.processedGraphQLPosts).slice(-500);
+      this.processedGraphQLPosts = new Set(toKeep);
     }
   }
 
@@ -187,6 +240,7 @@ class FBPostDetector {
   getStats() {
     return {
       processedCount: this.processedPosts.size,
+      processedGraphQLCount: this.processedGraphQLPosts.size,
       postIdCounter: this.postIdCounter,
     };
   }

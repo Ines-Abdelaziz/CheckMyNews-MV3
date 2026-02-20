@@ -14,6 +14,5 @@ export const state = {
 };
 
 export async function initState(state) {
-  console.log("Initializing extension state…");
   // future: load persisted values if needed
 }

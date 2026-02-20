@@ -1,5 +1,4 @@
 // content-scripts/feedAds.js
-console.log("[CMN][ADS] FeedAds loaded");
 
 window.FeedAds = {
   processed: new WeakSet(),

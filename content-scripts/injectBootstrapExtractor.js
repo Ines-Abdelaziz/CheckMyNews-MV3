@@ -1,9 +1,7 @@
-console.log("[CMN][Injector] Injecting bootstrap extractor");
 
 // const script = document.createElement("script");
 // script.src = chrome.runtime.getURL("page-scripts/fbBootstrapExtractor.page.js");
 // script.onload = () => {
-//   console.log("[CMN][Injector] ✅ Bootstrap injected");
 //   script.remove();
 // };
 

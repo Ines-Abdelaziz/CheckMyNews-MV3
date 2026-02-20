@@ -1,6 +1,4 @@
 // content-scripts/fbGraphQLInterceptor.js
-console.log("[CMN][GraphQL] fbGraphQLInterceptor loaded");
-console.log("[CMN][GraphQL][PAGE] Running in page context", location.href);
 
 class FBGraphQLInterceptor {
   constructor() {
@@ -10,19 +8,71 @@ class FBGraphQLInterceptor {
       window.__CMN_GRAPHQL_STORE__ = new Map();
     }
 
+    if (!window.__CMN_EXTRACTED_POSTS__) {
+      window.__CMN_EXTRACTED_POSTS__ = [];
+    }
+
+    if (!window.__CMN_WAIST_DOC_IDS__) {
+      window.__CMN_WAIST_DOC_IDS__ = new Map();
+    }
+    if (!window.__CMN_WAIST_DOC_ID__) {
+      window.__CMN_WAIST_DOC_ID__ = null;
+    }
+
     this.store = window.__CMN_GRAPHQL_STORE__;
     this.originalFetch = window.fetch;
     this.originalXHR = window.XMLHttpRequest;
+  }
+
+  /* ---------------- DOC ID CAPTURE ---------------- */
+
+  maybeCaptureDocIdFromBody(body) {
+    if (!body) return;
+
+    let params;
+    if (typeof body === "string") {
+      params = new URLSearchParams(body);
+    } else if (body instanceof URLSearchParams) {
+      params = body;
+    } else {
+      return;
+    }
+
+    const docId = params.get("doc_id");
+    if (!docId) return;
+
+    const friendlyName =
+      params.get("fb_api_req_friendly_name") ||
+      params.get("fb_api_req_friendly_name[]") ||
+      "";
+
+    const cleanName = friendlyName.replace(/\\.graphql$/, "");
+
+    const looksLikeWaist =
+      /WAIST|AdPrefs|AdsPref|AdPreference|WhyAmISeeing/i.test(cleanName);
+
+    if (!looksLikeWaist) return;
+
+    window.__CMN_WAIST_DOC_ID__ = docId;
+    if (cleanName) {
+      window.__CMN_WAIST_DOC_IDS__.set(cleanName, docId);
+    }
+
   }
 
   start() {
     if (this.started) return;
     this.started = true;
 
-    console.log("[CMN][GraphQL] Starting interceptor");
 
-    //this.interceptFetch();
+    this.interceptFetch();
     this.interceptXHR();
+    // At the end of your GraphQL interceptor
+    window.__CMN_GRAPHQL_POSTS__ = window.__CMN_EXTRACTED_POSTS__ || [];
+
+    // Emit custom event when posts are added
+    window.addEventListener("CMN_POSTS_EXTRACTED", (event) => {
+    });
   }
 
   /* ---------------- FETCH ---------------- */
@@ -31,6 +81,14 @@ class FBGraphQLInterceptor {
     const self = this;
 
     window.fetch = async function (...args) {
+      try {
+        const url = args[0];
+        const init = args[1] || {};
+        if (typeof url === "string" && url.includes("graphql")) {
+          self.maybeCaptureDocIdFromBody(init.body);
+        }
+      } catch (_) {}
+
       const response = await self.originalFetch.apply(this, args);
       try {
         const url = args[0];
@@ -38,7 +96,7 @@ class FBGraphQLInterceptor {
           response
             .clone()
             .text()
-            .then((text) => self.parseGraphQLText(text, url))
+            .then((text) => self.parseGraphQLText(text))
             .catch(() => {});
         }
       } catch (e) {}
@@ -61,12 +119,28 @@ class FBGraphQLInterceptor {
         return open.call(this, method, url, ...rest);
       };
 
+      const send = xhr.send;
+      xhr.send = function (body) {
+        if (this.__cmn_url?.includes("graphql")) {
+          self.maybeCaptureDocIdFromBody(body);
+        }
+        return send.call(this, body);
+      };
+
       xhr.addEventListener("load", function () {
         if (!this.__cmn_url?.includes("graphql")) return;
 
         // Get response text
-        const text =
-          this.responseText || new TextDecoder("utf-8").decode(this.response);
+        let text = "";
+        if (typeof this.responseText === "string" && this.responseText.length) {
+          text = this.responseText;
+        } else if (this.response instanceof ArrayBuffer) {
+          text = new TextDecoder("utf-8").decode(this.response);
+        } else if (this.response && typeof this.response === "object") {
+          try {
+            text = JSON.stringify(this.response);
+          } catch (_) {}
+        }
 
         if (!text) return;
 
@@ -76,18 +150,8 @@ class FBGraphQLInterceptor {
 
           // Extract posts
           const posts = self.extractFacebookPosts(jsonData);
-          //STORE
-          if (posts.length > 0) {
-            window.__CMN_EXTRACTED_POSTS__ =
-              window.__CMN_EXTRACTED_POSTS__.concat(posts);
-
-            sessionStorage.setItem(
-              "__CMN_EXTRACTED_POSTS__",
-              JSON.stringify(window.__CMN_EXTRACTED_POSTS__)
-            );
-          }
+          self.handleExtractedPosts(posts);
         } catch (e) {
-          console.error("[CMN] Error:", e.message);
         }
       });
 
@@ -114,10 +178,6 @@ class FBGraphQLInterceptor {
         const parsed = JSON.parse(line);
         results.push(parsed);
       } catch (e) {
-        console.warn(
-          `[CMN] ⚠️ Line ${i} failed to parse:`,
-          e.message.substring(0, 50)
-        );
         // Continue to next line instead of stopping
       }
     }
@@ -139,6 +199,38 @@ class FBGraphQLInterceptor {
 
     throw new Error(
       `Could not parse any valid JSON from ${lines.length} lines`
+    );
+  }
+
+  parseGraphQLText(text) {
+    if (!text) return;
+    try {
+      const jsonData = this.parseJsonSafely(text);
+      const posts = this.extractFacebookPosts(jsonData);
+      this.handleExtractedPosts(posts);
+    } catch (e) {
+    }
+  }
+
+  handleExtractedPosts(posts) {
+    if (!Array.isArray(posts) || posts.length === 0) return;
+
+    window.__CMN_EXTRACTED_POSTS__ =
+      window.__CMN_EXTRACTED_POSTS__.concat(posts);
+
+    sessionStorage.setItem(
+      "__CMN_EXTRACTED_POSTS__",
+      JSON.stringify(window.__CMN_EXTRACTED_POSTS__)
+    );
+
+    window.dispatchEvent(
+      new CustomEvent("CMN_POSTS_EXTRACTED", {
+        detail: {
+          posts: posts,
+          count: posts.length,
+          timestamp: Date.now(),
+        },
+      })
     );
   }
   extractJSONBlocks(text) {
@@ -177,7 +269,6 @@ class FBGraphQLInterceptor {
     ) {
       return null;
     }
-
     const post = {
       id: storyNode.id,
       post_id: storyNode.post_id,
@@ -186,7 +277,6 @@ class FBGraphQLInterceptor {
         storyNode.comet_sections.context_layout.story.comet_sections.metadata[1]
           .story?.creation_time || null,
       author: null,
-      attachments: [],
       message: null,
       url: null,
       privacy:
@@ -195,12 +285,49 @@ class FBGraphQLInterceptor {
         storyNode.comet_sections.context_layout.story.comet_sections
           ?.metadata[1]?.story.privacy_scope ||
         null,
+      is_attachment:
+        Array.isArray(storyNode.attachments) &&
+        storyNode.attachments.length > 0,
       attachments: [],
+      images: [], // To be filled from attachments
+      videos: [], // To be filled from attachments
+
       to: null,
+      ad: null,
+      engagment: {
+        reaction_count:
+          storyNode.comet_sections.feedback?.story.story_ufi_container.story
+            .feedback_context.feedback_target_with_context
+            .comet_ufi_summary_and_actions_renderer.feedback.reaction_count
+            .count || null,
+        comment_count:
+          storyNode.comet_sections.feedback?.story.story_ufi_container.story
+            .feedback_context.feedback_target_with_context
+            .comet_ufi_summary_and_actions_renderer.feedback
+            ?.comment_rendering_instance?.comments?.total_count || null,
+        share_count:
+          storyNode.comet_sections.feedback?.story.story_ufi_container.story
+            .feedback_context.feedback_target_with_context
+            .comet_ufi_summary_and_actions_renderer.feedback.share_count
+            .count || null,
+      },
     };
+
+    // Extract ad information if present
+    if (storyNode.th_dat_spo) {
+      post.ad = {
+        ad_id: storyNode.th_dat_spo.lbl_adv_iden || null,
+        client_token: storyNode.th_dat_spo.client_token || null,
+        url: storyNode.comet_sections.content.story.attachments[0].styles
+          .attachment?.story_attachment_link_renderer?.attachment?.url,
+      };
+    }
+
     // --- Extract attachments (ads & link cards) ---
     if (Array.isArray(storyNode.attachments)) {
       post.attachments = storyNode.attachments.map((att) => {
+        const med = att.media;
+        const type = med?.__typename;
         const style = att.styles;
         const attachment = style?.attachment;
         const media = attachment?.media;
@@ -208,7 +335,8 @@ class FBGraphQLInterceptor {
         const webLink = linkRenderer?.attachment?.web_link;
 
         return {
-          renderer_type: style?.__typename || null,
+          type: type || null,
+          id: med?.id || null,
 
           image: {
             flexible: media?.flexible_height_share_image?.uri || null,
@@ -229,6 +357,40 @@ class FBGraphQLInterceptor {
 
       post.attachment_count = post.attachments.length;
     }
+    if (Array.isArray(storyNode.attachments)) {
+      post.images = storyNode.attachments
+        .map((att) => {
+          const media = att.media;
+          const type = media?.__typename;
+          const mediaa = att.styles?.attachment?.media;
+          if (type === "Photo") {
+            return {
+              id: mediaa?.id || null,
+              photo_image: mediaa?.photo_image?.uri || null,
+              height: mediaa?.photo_image?.height || null,
+              width: mediaa?.photo_image?.width || null,
+              url: mediaa?.url || null,
+            };
+          }
+          return null;
+        })
+        .filter(Boolean);
+
+      post.videos = storyNode.attachments
+        .map((att) => {
+          const type = att.media?.__typename;
+          const mediaa = att.styles?.attachment?.media;
+          if (type === "Video") {
+            return {
+              videoId: mediaa?.videoId || null,
+              thumbnailImage: mediaa?.thumbnailImage?.uri || null,
+              url: mediaa?.url || null,
+            };
+          }
+          return null;
+        })
+        .filter(Boolean);
+    }
 
     // Extract author information
     if (storyNode.actors && storyNode.actors.length > 0) {
@@ -236,8 +398,14 @@ class FBGraphQLInterceptor {
       post.author = {
         name: actor.name,
         id: actor.id,
+        page: actor.url,
         type: actor.__typename,
-        profile_picture: actor.profile_picture?.uri,
+        profile_picture:
+          storyNode.comet_sections?.header?.story?.comet_sections?.actor_photo
+            ?.story?.actors?.[0]?.profile_picture?.uri ||
+          storyNode.comet_sections?.context_layout?.story?.comet_sections
+            ?.actor_photo?.story?.actors?.[0]?.profile_picture?.uri ||
+          null,
       };
     }
 
@@ -302,15 +470,117 @@ class FBGraphQLInterceptor {
       // Privacy extraction failed
     }
 
-    // Extract attachments
-    if (storyNode.attachments && Array.isArray(storyNode.attachments)) {
-      post.attachments = storyNode.attachments;
-      post.attachment_count = storyNode.attachments.length;
-    }
-
     return post;
   }
 
+  extractAdExplanationDetails(storyNode) {
+    const details = {
+      explanation_text: null,
+      reasons: [],
+      advertisers: [],
+      client_token: null,
+    };
+
+    const textKeys = new Set([
+      "ad_explanation",
+      "ad_explanation_text",
+      "ad_explanation_body",
+      "explanation",
+    ]);
+    const reasonKeys = new Set([
+      "ad_targeting_reasons",
+      "ad_targeting_reason",
+      "ad_targeting",
+      "targeting_reasons",
+      "targeting_reason",
+    ]);
+    const advertiserKeys = new Set([
+      "advertiser",
+      "advertisers",
+      "ad_advertiser",
+      "sponsor",
+      "sponsored_by",
+    ]);
+    const clientTokenKeys = new Set([
+      "client_token",
+      "ad_client_token",
+      "ad_client_token_id",
+    ]);
+
+    const addReason = (val) => {
+      if (typeof val === "string") {
+        const t = val.trim();
+        if (t.length > 8) details.reasons.push(t);
+      }
+    };
+
+    const addAdvertiser = (val) => {
+      if (typeof val === "string") {
+        const t = val.trim();
+        if (t.length > 1) details.advertisers.push(t);
+      } else if (val && typeof val === "object") {
+        const name = val.name || val.title || val.text;
+        if (typeof name === "string" && name.trim().length > 1) {
+          details.advertisers.push(name.trim());
+        }
+      }
+    };
+
+    const stack = [{ obj: storyNode, depth: 0 }];
+    const maxDepth = 8;
+
+    while (stack.length) {
+      const { obj, depth } = stack.pop();
+      if (!obj || typeof obj !== "object" || depth > maxDepth) continue;
+
+      for (const key in obj) {
+        const val = obj[key];
+
+        if (textKeys.has(key) && !details.explanation_text) {
+          if (typeof val === "string" && val.trim()) {
+            details.explanation_text = val.trim();
+          } else if (val && typeof val === "object") {
+            const text = val.text || val.body || val.title;
+            if (typeof text === "string" && text.trim()) {
+              details.explanation_text = text.trim();
+            }
+          }
+        }
+
+        if (reasonKeys.has(key)) {
+          if (Array.isArray(val)) {
+            val.forEach(addReason);
+          } else {
+            addReason(val);
+          }
+        }
+
+        if (advertiserKeys.has(key)) {
+          if (Array.isArray(val)) {
+            val.forEach(addAdvertiser);
+          } else {
+            addAdvertiser(val);
+          }
+        }
+
+        if (clientTokenKeys.has(key) && !details.client_token) {
+          if (typeof val === "string" && val.trim().length > 3) {
+            details.client_token = val.trim();
+          }
+        }
+
+        if (val && typeof val === "object") {
+          stack.push({ obj: val, depth: depth + 1 });
+        }
+      }
+    }
+
+    // Deduplicate
+    details.reasons = [...new Set(details.reasons)];
+    details.advertisers = [...new Set(details.advertisers)];
+
+    return details;
+  }
   extractFacebookPosts(jsonData) {
     const posts = [];
 
@@ -346,7 +616,6 @@ class FBGraphQLInterceptor {
       findStories(response);
     }
     if (posts.length > 0) {
-      console.log("[CMN][GraphQL] Extracted posts:", posts);
     }
 
     return posts;
@@ -369,33 +638,219 @@ class FBGraphQLInterceptor {
   }
 }
 
+// -------------------------------------------
+// GraphQL explanation fetcher (page context)
+// -------------------------------------------
+
+function encodeFormBody(obj) {
+  return Object.keys(obj)
+    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(obj[k])}`)
+    .join("&");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function resolveDocId() {
+  if (window.__CMN_WAIST_DOC_ID__) {
+    return { id: window.__CMN_WAIST_DOC_ID__, module: "captured" };
+  }
+
+  if (window.__CMN_WAIST_DOC_IDS__?.size) {
+    const first = window.__CMN_WAIST_DOC_IDS__.entries().next();
+    if (!first.done) {
+      const [name, id] = first.value;
+      return { id, module: `captured:${name}` };
+    }
+  }
+
+  const knownModules = [
+    "CometAdPrefsWAISTDialogRootQuery$Parameters",
+    "CometAdPrefsWAISTYouthDialogRootQuery$Parameters",
+    "AdsPrefWAISTDialogQuery$Parameters",
+  ];
+
+  for (const name of knownModules) {
+    try {
+      const mod = require(name);
+      const id = mod?.params?.id || mod?.id;
+      if (id) return { id, module: name };
+    } catch (_) {}
+  }
+
+  try {
+    const moduleMap = require("moduleMap") || {};
+    const candidates = Object.keys(moduleMap).filter((m) =>
+      /WAIST|AdPrefs|AdsPref|AdPreference|WhyAmISeeing/i.test(m)
+    );
+    for (const name of candidates) {
+      if (!name.endsWith("$Parameters")) continue;
+      try {
+        const mod = require(name);
+        const id = mod?.params?.id || mod?.id;
+        if (id) return { id, module: name };
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+async function fetchAdExplanationGraphQL({ adId, clientToken }) {
+  if (!adId || !clientToken) {
+    throw new Error("missing_adId_or_clientToken");
+  }
+
+  if (typeof require !== "function") {
+    throw new Error("require_unavailable");
+  }
+
+  const asyncParams = require("getAsyncParams")("POST");
+
+  let docId = null;
+  let docModuleName = null;
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const resolved = await resolveDocId();
+    if (resolved?.id) {
+      docId = resolved.id;
+      docModuleName = resolved.module;
+      break;
+    }
+    await sleep(300);
+  }
+
+  if (!docId) {
+    throw new Error("doc_id_not_found");
+  }
+
+  if (docModuleName) {
+  }
+
+  const operationName = docModuleName
+    ? docModuleName.replace(/\$Parameters$/, "")
+    : "CometAdPrefsWAISTDialogRootQuery";
+
+
+  const requestId = `${Date.now()}_${adId}`;
+
+  const fieldsPayload = {
+    ad_id: adId,
+    client_token: clientToken,
+    entrypoint: "DESKTOP_WAIST_DIALOG",
+    request_id: requestId,
+  };
+
+  const variableCandidates = /YouthDialog/i.test(operationName)
+    ? [
+        { adId, fields: fieldsPayload },
+        { fields: fieldsPayload },
+        { adId, clientToken },
+      ]
+    : [
+        { adId, fields: fieldsPayload },
+        { adId, clientToken },
+        { fields: fieldsPayload },
+      ];
+
+  const isMissingRequiredVariable = (text) => {
+    if (!text) return false;
+    const cleaned = text.startsWith("for (;;);")
+      ? text.replace("for (;;);", "")
+      : text;
+    try {
+      const json = JSON.parse(cleaned);
+      const errors = json?.errors || [];
+      return errors.some((err) => {
+        const msg = String(err?.message || "").toLowerCase();
+        const code = err?.code || err?.api_error_code;
+        return (
+          msg.includes("missing_required_variable_value") || code === 1675012
+        );
+      });
+    } catch {
+      return false;
+    }
+  };
+
+  let lastError = null;
+
+  for (const variables of variableCandidates) {
+    const body = {
+      ...asyncParams,
+      av: asyncParams.__user,
+      fb_api_caller_class: "RelayModern",
+      fb_api_req_friendly_name: operationName,
+      variables: JSON.stringify(variables),
+      doc_id: docId,
+    };
+
+    const resp = await fetch("https://www.facebook.com/api/graphql/", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: encodeFormBody(body),
+    });
+
+    if (!resp.ok) {
+      lastError = new Error(`HTTP ${resp.status}`);
+      continue;
+    }
+
+    const text = await resp.text();
+    if (isMissingRequiredVariable(text)) {
+      lastError = new Error("missing_required_variable_value");
+      continue;
+    }
+
+    return text;
+  }
+
+  throw lastError || new Error("graphql_explanation_failed");
+}
+
+window.addEventListener("message", async (event) => {
+  if (event.source !== window) return;
+  const data = event.data || {};
+  if (data.source !== "CMN_CONTENT") return;
+  if (data.type !== "CMN_FETCH_AD_EXPLANATION") return;
+
+  const requestId = data.requestId;
+  try {
+    const responseText = await fetchAdExplanationGraphQL({
+      adId: data.adId,
+      clientToken: data.clientToken,
+    });
+
+    window.postMessage(
+      {
+        source: "CMN_PAGE",
+        type: "CMN_EXPLANATION_RESPONSE",
+        requestId,
+        ok: true,
+        responseText,
+      },
+      "*"
+    );
+  } catch (e) {
+    window.postMessage(
+      {
+        source: "CMN_PAGE",
+        type: "CMN_EXPLANATION_RESPONSE",
+        requestId,
+        ok: false,
+        error: e?.message || String(e),
+      },
+      "*"
+    );
+  }
+});
+
 /* ---------------- BOOTSTRAP ---------------- */
 
 (function () {
-  console.log("[CMN][GraphQL][PAGE] Initializing interceptor");
   const interceptor = new FBGraphQLInterceptor();
   interceptor.start();
   window.__CMN_GRAPHQL_INTERCEPTOR__ = interceptor;
-  // At the end of your GraphQL interceptor
-  window.__CMN_GRAPHQL_POSTS__ = window.__CMN_EXTRACTED_POSTS__ || [];
-
-  // Emit custom event when posts are added
-  window.addEventListener("CMN_POSTS_EXTRACTED", (event) => {
-    console.log("[GraphQL] Posts extracted:", event.detail);
-  });
-
-  // When you add posts to cache, emit event
-  if (posts.length > 0) {
-    window.__CMN_EXTRACTED_POSTS__.push(...posts);
-
-    window.dispatchEvent(
-      new CustomEvent("CMN_POSTS_EXTRACTED", {
-        detail: {
-          posts: posts,
-          count: posts.length,
-          timestamp: Date.now(),
-        },
-      })
-    );
-  }
 })();

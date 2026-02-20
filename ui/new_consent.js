@@ -6,12 +6,14 @@ const HOST_SERVER = "https://adanalystplus.lix.polytechnique.fr/";
 // 1. Send consent to background service worker
 // -----------------------------------------------------
 function sendConsent() {
-  console.log("[CONSENT] Sending consent…");
 
   chrome.runtime.sendMessage(
     { type: "registerConsent", payload: { consent: true } },
     (response) => {
-      console.log("[CONSENT] Response:", response);
+      if (chrome.runtime.lastError) {
+        showError();
+        return;
+      }
 
       // Background failed or unreachable
       if (!response || response.ok === false) {
@@ -30,6 +32,10 @@ function sendConsent() {
 // -----------------------------------------------------
 function pollConsentStatus() {
   chrome.runtime.sendMessage({ type: "getConsentStatus" }, (response) => {
+    if (chrome.runtime.lastError) {
+      setTimeout(pollConsentStatus, 5000);
+      return;
+    }
     if (!response || !response.ok) {
       setTimeout(pollConsentStatus, 5000);
       return;

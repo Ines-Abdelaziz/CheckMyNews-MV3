@@ -13,6 +13,7 @@ const TAB_STATE_KEY = "news_tab_state"; // optional persistence
 
 // In-memory tab state
 const tabState = {}; // tabId → { domain, url, isNews, lastFocused }
+let initialized = false;
 
 // -------------------------------------------------------
 // Helpers
@@ -67,7 +68,6 @@ async function recordNewsVisit(domain, url) {
 
   await lsSet(NEWS_VISITS_KEY, visits);
 
-  console.log("[NEWS] Visit recorded:", normalized, url, org);
 }
 
 // -------------------------------------------------------
@@ -80,7 +80,6 @@ async function addNewsTime(domain, deltaMs) {
   map[domain] = (map[domain] || 0) + deltaMs;
 
   await lsSet(NEWS_ACTIVITY_KEY, map);
-  console.log(`[NEWS] +${deltaMs}ms -> ${domain} (total: ${map[domain]}ms)`);
 }
 
 // -------------------------------------------------------
@@ -186,7 +185,8 @@ export async function getNewsVisits() {
 // Initialization for service worker
 // -------------------------------------------------------
 export async function initNewsSystem() {
-  console.log("[NEWS] Initializing unified news tracker…");
+  if (initialized) return;
+  initialized = true;
 
   chrome.tabs.onUpdated.addListener(handleTabUpdated);
   chrome.tabs.onRemoved.addListener(handleTabRemoved);

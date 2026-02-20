@@ -40,8 +40,11 @@ $("#consentForm").hide();
 // -------------------------------
 function loadConsentStatus() {
   chrome.runtime.sendMessage({ type: "getConsentStatus" }, (response) => {
+    if (chrome.runtime.lastError) {
+      setTimeout(loadConsentStatus, 3000);
+      return;
+    }
     if (!response || !response.ok) {
-      console.warn("[POPUP] Consent status unavailable.");
       setTimeout(loadConsentStatus, 3000);
       return;
     }
@@ -66,7 +69,10 @@ function loadConsentStatus() {
     }
 
     // Logged in but NO consent → open full consent page
-    chrome.runtime.sendMessage({ type: "openConsentPage" });
+    chrome.runtime.sendMessage({ type: "openConsentPage" }, () => {
+      if (chrome.runtime.lastError) {
+      }
+    });
     window.close();
   });
 }
@@ -78,6 +84,9 @@ function registerConsent() {
   chrome.runtime.sendMessage(
     { type: "registerConsent", payload: { consent: true } },
     (response) => {
+      if (chrome.runtime.lastError) {
+        return;
+      }
       if (response && response.ok) {
         $("#consentForm").hide();
         $("#normalView").show();
@@ -102,6 +111,7 @@ function openConsentPage() {
 // -------------------------------
 function loadAdsSummary() {
   chrome.runtime.sendMessage({ type: "getAdsSummary" }, (response) => {
+    if (chrome.runtime.lastError) return;
     if (!response || !response.ads) return;
     $("#adsCount").text(response.ads.count || 0);
   });
@@ -112,6 +122,7 @@ function loadAdsSummary() {
 // -------------------------------
 function loadNewsSummary() {
   chrome.runtime.sendMessage({ type: "getNewsActivity" }, (response) => {
+    if (chrome.runtime.lastError) return;
     if (!response || !response.activity) return;
     $("#newsCount").text(Object.keys(response.activity).length);
   });

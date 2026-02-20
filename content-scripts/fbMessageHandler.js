@@ -1,5 +1,4 @@
 // content-scripts/fbMessageHandler.js
-console.log("[CMN] fbMessageHandler loaded");
 
 class FBMessageHandler {
   constructor() {
@@ -23,12 +22,10 @@ class FBMessageHandler {
       this.handleMainWorldMessage(event.data);
     });
 
-    console.log("[CMN] Message listeners setup");
   }
 
   // Handle message from background
   handleMessage(message, sender, sendResponse) {
-    console.log("[CMN] Received message:", message.type);
 
     switch (message.type) {
       case "GET_STATS":
@@ -59,14 +56,12 @@ class FBMessageHandler {
         break;
 
       default:
-        console.warn("[CMN] Unknown message type:", message.type);
         sendResponse({ error: "Unknown message type" });
     }
   }
 
   // Handle message from MAIN world
   handleMainWorldMessage(data) {
-    console.log("[CMN] MAIN world message:", data.type);
 
     switch (data.type) {
       case "USER_ID":
@@ -81,7 +76,6 @@ class FBMessageHandler {
         break;
 
       default:
-        console.warn("[CMN] Unknown MAIN world message:", data.type);
     }
   }
 
@@ -94,10 +88,8 @@ class FBMessageHandler {
         timestamp: Date.now(),
       });
 
-      console.log(`[CMN] Message sent to background: ${type}`, response);
       return response;
     } catch (error) {
-      console.error(`[CMN] Error sending message to background:`, error);
       throw error;
     }
   }
@@ -138,7 +130,6 @@ class FBMessageHandler {
       try {
         callback(data);
       } catch (error) {
-        console.error(`[CMN] Error in event handler for ${event}:`, error);
       }
     });
   }

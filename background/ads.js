@@ -4,11 +4,7 @@
 
 import { offscreenRequest } from "./utils/domparser.js";
 import { lsGet, lsSet } from "./utils/storage.js";
-
-// Placeholder: You can import real replaceUserIdEmail if you already migrated it
-async function replaceUserIdEmail(obj) {
-  return obj; // no-op for now
-}
+import { replaceUserIdEmail } from "./utils/errors.js";
 
 // Utility: safe JSON POST
 async function postJSON(url, bodyObj) {
@@ -21,51 +17,179 @@ async function postJSON(url, bodyObj) {
   return res.json();
 }
 
+const REGISTER_AD_REQUIRED_BASE = ["type", "timestamp", "raw_ad", "user_id"];
+const REGISTER_AD_REQUIRED_BY_TYPE = {
+  frontAd: [
+    "html_ad_id",
+    "visible",
+    "visible_fraction",
+    "visibleDuration",
+    "offsetX",
+    "offsetY",
+    "landing_pages",
+    "images",
+  ],
+  newsPost: [
+    "html_ad_id",
+    "visible",
+    "visible_fraction",
+    "visibleDuration",
+    "offsetX",
+    "offsetY",
+    "landing_pages",
+    "images",
+    "landing_domain",
+  ],
+  publicPost: [
+    "html_ad_id",
+    "visible",
+    "visible_fraction",
+    "visibleDuration",
+    "offsetX",
+    "offsetY",
+    "landing_pages",
+    "images",
+  ],
+  sideAd: ["fb_id"],
+};
+
+function missingFields(payload, fields) {
+  return fields.filter((k) => {
+    if (!(k in payload)) return true;
+    const v = payload[k];
+    if (v === undefined || v === null) return true;
+    if (typeof v === "string" && v.trim() === "") return true;
+    return false;
+  });
+}
+
+function validateAndLogRegisterAdPayload(payload) {
+  const type = payload?.type || payload?.adType || "unknown";
+  const required = [
+    ...REGISTER_AD_REQUIRED_BASE,
+    ...(REGISTER_AD_REQUIRED_BY_TYPE[type] || []),
+  ];
+  const missing = missingFields(payload || {}, required);
+  const summary = {
+    type,
+    html_ad_id: payload?.html_ad_id || null,
+    adanalyst_ad_id: payload?.adanalyst_ad_id || null,
+    fb_id: payload?.fb_id || null,
+    has_media_content:
+      payload?.media_content && Object.keys(payload.media_content).length > 0,
+    missing_count: missing.length,
+    missing,
+  };
+  const fullPayload = {
+    ...(payload || {}),
+    raw_ad_preview:
+      typeof payload?.raw_ad === "string"
+        ? payload.raw_ad.slice(0, 400)
+        : payload?.raw_ad || null,
+    raw_ad_length:
+      typeof payload?.raw_ad === "string" ? payload.raw_ad.length : 0,
+  };
+  delete fullPayload.raw_ad;
+  if (missing.length > 0) {
+  } else {
+  }
+}
+
 // -----------------------------------------------------------
 // IMAGE → BASE64 via OFFSCREEN
 // -----------------------------------------------------------
 async function convertImagesToBase64(urls) {
   if (!urls || urls.length === 0) return {};
   try {
-    const { map } = await offscreenRequest("imagesToDataURLs", { urls });
+    const response = await offscreenRequest("imagesToDataURLs", { urls });
+    const map = response && typeof response === "object" ? response.map : null;
     return map || {};
   } catch (e) {
-    console.warn("[ads] convertImagesToBase64 failed:", e);
     return {};
   }
+}
+
+function attachmentMediaUrls(attachments) {
+  const urls = new Set();
+  const list = Array.isArray(attachments) ? attachments : [];
+  for (const att of list) {
+    if (att?.image?.flexible) urls.add(att.image.flexible);
+    if (att?.image?.large) urls.add(att.image.large);
+  }
+  return [...urls].filter(Boolean);
 }
 
 // -----------------------------------------------------------
 // MAIN ENTRY: handleFrontAd()
 // Called from service-worker on message.type === "frontAd"
 // -----------------------------------------------------------
+import "../third-party/sha512.min.js";
+
+const hashFn =
+  typeof globalThis?.sha512 === "function"
+    ? globalThis.sha512
+    : globalThis?.sha512?.sha512?.bind(globalThis.sha512) ||
+      globalThis?.sha512?.sha512_384?.bind(globalThis.sha512);
+
+const REGISTER_AD_ALLOWED_FIELDS = new Set([
+  "raw_ad",
+  "html_ad_id",
+  "timestamp",
+  "offsetX",
+  "offsetY",
+  "type",
+  "landing_pages",
+  "images",
+  "visible",
+  "visible_fraction",
+  "visibleDuration",
+  "fb_id",
+  "objId",
+  "advertiser_facebook_id",
+  "advertiser_facebook_page",
+  "advertiser_facebook_profile_pic",
+  "video",
+  "video_id",
+  "adanalyst_ad_id",
+  "landing_domain",
+  "explanationUrl",
+  "clientToken",
+  "graphQLAsyncParams",
+  "serialized_frtp_identifiers",
+  "story_debug_info",
+  "newInterface",
+  "adType",
+]);
+
 export async function handleFrontAd(state, URLS_SERVER, message, sendResponse) {
   try {
     const CURRENT_USER_ID = state.CURRENT_USER_ID;
-    const images = message.fullImageURLs || message.imageURLs || [];
+    const images = [
+      ...(message.fullImageURLs || []),
+      ...(message.imageURLs || []),
+      ...(message.advertiserProfilePic ? [message.advertiserProfilePic] : []),
+    ];
 
-    // 1) Convert images using offscreen
     const mediaContent = await convertImagesToBase64(images);
 
-    // 2) Build final payload for backend
     const payload = {
       user_id: CURRENT_USER_ID,
       fb_id: message.fb_id,
+      objId: message.objId || null,
       pageName: message.pageName || "",
       text: message.text || "",
       links: message.links || [],
       clientToken: message.clientToken || null,
       graphQLAsyncParams: message.graphQLAsyncParams || null,
-      newInterface: message.newInterface === true,
-      adType: message.adType || "feed",
-      objId: message.objId || null,
       serialized_frtp_identifiers: message.serialized_frtp_identifiers || null,
       story_debug_info: message.story_debug_info || null,
-      MEDIA_CONTENT: mediaContent, // base64 images
+      newInterface: message.newInterface === true,
+      adType: message.adType || "feed",
+      MEDIA_CONTENT: mediaContent,
       timestamp: Date.now(),
     };
 
-    const requestForServer = await replaceUserIdEmail(payload);
+    const requestForServer = await replaceUserIdEmail(payload, hashFn);
 
     // 3) Send to server
     const resp = await postJSON(URLS_SERVER.registerAd, requestForServer);
@@ -76,7 +200,6 @@ export async function handleFrontAd(state, URLS_SERVER, message, sendResponse) {
       dbId: resp.ad_id || null,
     });
   } catch (e) {
-    console.error("[ads] handleFrontAd error:", e);
     sendResponse?.({ saved: false, error: e.toString() });
   }
 }
@@ -87,22 +210,31 @@ export async function handleFrontAd(state, URLS_SERVER, message, sendResponse) {
 export async function handleSideAd(state, URLS_SERVER, message, sendResponse) {
   try {
     const CURRENT_USER_ID = state.CURRENT_USER_ID;
-    const images = message.fullImageURLs || message.imageURLs || [];
+    const images = [
+      ...(message.fullImageURLs || []),
+      ...(message.imageURLs || []),
+      ...(message.advertiserProfilePic ? [message.advertiserProfilePic] : []),
+    ];
 
     const mediaContent = await convertImagesToBase64(images);
 
     const payload = {
       user_id: CURRENT_USER_ID,
       fb_id: message.fb_id,
+      objId: message.objId || null,
       pageName: message.pageName || "",
       text: message.text || "",
       links: message.links || [],
+      clientToken: message.clientToken || null,
+      graphQLAsyncParams: message.graphQLAsyncParams || null,
+      serialized_frtp_identifiers: message.serialized_frtp_identifiers || null,
+      story_debug_info: message.story_debug_info || null,
       MEDIA_CONTENT: mediaContent,
       timestamp: Date.now(),
       adType: "sidebar",
     };
 
-    const requestForServer = await replaceUserIdEmail(payload);
+    const requestForServer = await replaceUserIdEmail(payload, hashFn);
     const resp = await postJSON(URLS_SERVER.registerAd, requestForServer);
 
     sendResponse?.({
@@ -110,7 +242,6 @@ export async function handleSideAd(state, URLS_SERVER, message, sendResponse) {
       dbId: resp.ad_id || null,
     });
   } catch (e) {
-    console.error("[ads] handleSideAd error:", e);
     sendResponse?.({ saved: false, error: e.toString() });
   }
 }
@@ -158,20 +289,93 @@ export async function handleClickedAds(
         timestamp: Date.now(),
       };
 
-      const requestForServer = await replaceUserIdEmail(payload);
+      const requestForServer = await replaceUserIdEmail(payload, hashFn);
 
       try {
         await postJSON(URLS_SERVER.registerClickedAd, requestForServer);
       } catch (e) {
-        console.warn("[ads] Failed to send clicked ad:", e);
       }
     }
 
     sendResponse?.({ ok: true, count: keys.length });
   } catch (e) {
-    console.error("[ads] handleClickedAds error:", e);
     sendResponse?.({ ok: false, error: e.toString() });
   }
+}
+
+// -----------------------------------------------------------
+// handleRegisterAdBatch()
+// Receives MV2-style ad/news post payloads from content scripts
+// -----------------------------------------------------------
+export async function handleRegisterAdBatch(
+  state,
+  URLS_SERVER,
+  message,
+  sendResponse
+) {
+  try {
+    const payloads = Array.isArray(message.payloads) ? message.payloads : [];
+    if (payloads.length === 0) {
+      sendResponse?.({ ok: true, count: 0 });
+      return;
+    }
+
+    let success = 0;
+    const mappings = [];
+    for (const payload of payloads) {
+      // media_content comes only from attachment-derived urls.
+      const images = Array.isArray(payload.attachment_media_urls)
+        ? payload.attachment_media_urls.filter(Boolean)
+        : attachmentMediaUrls(payload.attachments);
+
+      const mediaContent = await convertImagesToBase64(images);
+
+      const requestPayload = buildRegisterAdRequestPayload(
+        payload,
+        state.CURRENT_USER_ID || payload.user_id || null,
+        mediaContent
+      );
+
+      delete requestPayload.MEDIA_CONTENT;
+
+      const requestForServer = await replaceUserIdEmail(
+        requestPayload,
+        hashFn
+      );
+      validateAndLogRegisterAdPayload(requestPayload);
+
+      try {
+        const out = await postJSON(URLS_SERVER.registerAd, requestForServer);
+        success++;
+        const dbId = out?.ad_id || null;
+        const adanalystAdId =
+          payload?.adanalyst_ad_id || payload?.html_ad_id || null;
+        if (dbId && adanalystAdId) {
+          mappings.push({
+            adanalyst_ad_id: String(adanalystAdId),
+            dbId: String(dbId),
+          });
+        }
+      } catch (e) {
+      }
+    }
+
+    sendResponse?.({ ok: true, count: success, mappings });
+  } catch (e) {
+    sendResponse?.({ ok: false, error: e.toString() });
+  }
+}
+
+function buildRegisterAdRequestPayload(payload, userId, mediaContent) {
+  const requestPayload = {
+    user_id: userId || null,
+    media_content: mediaContent || {},
+  };
+  for (const [k, v] of Object.entries(payload || {})) {
+    if (!REGISTER_AD_ALLOWED_FIELDS.has(k)) continue;
+    requestPayload[k] = v;
+  }
+  return requestPayload;
 }
 // Key where ads are stored
 const ADS_STORAGE_KEY = "ads_list";

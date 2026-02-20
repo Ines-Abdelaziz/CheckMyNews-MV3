@@ -21,7 +21,7 @@
 	 */
 	function Mus() {
 		if (this === undefined) {
-			console.error('Have you initialized Mus with "new" statement? (i.e. var mus = new Mus())');
+			void 0 && console.error('Have you initialized Mus with "new" statement? (i.e. var mus = new Mus())');
 			return;
 		}
 		this.frames = [];

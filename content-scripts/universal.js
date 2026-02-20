@@ -1,8 +1,6 @@
 (function () {
-  console.log("[CMN][UI] universal.js loaded");
 
   function detectUI(source) {
-    console.log(`[CMN][UI] detectUI called from ${source}`);
 
     let version = "unknown";
     let mobile = false;
@@ -26,13 +24,7 @@
         version = "comet";
       }
 
-      console.log("[CMN][UI] markers:", {
-        hasMain,
-        hasReactRoot,
-        hasClassic,
-      });
 
-      console.log("[CMN][UI] detected:", { version, mobile });
 
       window.dispatchEvent(
         new CustomEvent("CMN_UI_DETECTED", {
@@ -40,16 +32,13 @@
         })
       );
 
-      console.log("[CMN][UI] CMN_UI_DETECTED dispatched");
     } catch (e) {
-      console.error("[CMN][UI] detectUI error", e);
     }
   }
 
   // DO NOT run immediately
   // Facebook DOM is NOT ready at document_start
   function detectUIWithRetry(attempt = 1, maxAttempts = 5) {
-    console.log(`[CMN][UI] Detection attempt ${attempt}`);
 
     // Check if DOM is ready
     const hasMinimalDOM =

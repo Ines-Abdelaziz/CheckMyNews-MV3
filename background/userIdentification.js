@@ -16,12 +16,10 @@ export async function initUserIdentification(state) {
     state.CURRENT_USER_ID = stored;
     state.LOGGED_IN = true;
 
-    console.log("[USER] Loaded stored user ID:", stored);
   } else {
     state.CURRENT_USER_ID = null;
     state.LOGGED_IN = false; // ✅ explicit is better
 
-    console.log("[USER] No stored ID — waiting for detection.");
   }
 }
 
@@ -33,17 +31,21 @@ export async function updateDetectedUserId(state, userId) {
 
   if (state.CURRENT_USER_ID === userId) return true;
 
-  console.log("[USER] Detected new FB user ID:", userId);
 
   state.CURRENT_USER_ID = userId;
   state.LOGGED_IN = true;
 
   await lsSet(CURRENT_USER_ID_KEY, userId);
 
-  chrome.runtime.sendMessage({
-    type: "userIdUpdated",
-    userId,
-  });
+  try {
+    const maybePromise = chrome.runtime.sendMessage({
+      type: "userIdUpdated",
+      userId,
+    });
+    if (maybePromise && typeof maybePromise.catch === "function") {
+      maybePromise.catch(() => {});
+    }
+  } catch (_) {}
 
   return true;
 }

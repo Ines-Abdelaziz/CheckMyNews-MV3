@@ -1,5 +1,4 @@
-// content-scripts/fbDataExtractor.js
-console.log("[CMN] fbDataExtractor loaded");
+// content-scripts/fbDataExtractor.js - UPDATED FOR CURRENT FACEBOOK DOM
 
 class FBDataExtractor {
   constructor() {
@@ -9,62 +8,64 @@ class FBDataExtractor {
   // Extract all data from post
   extractPostData(element, postId) {
     try {
+      // Only extract what you actually need!
+      const postLink = element.querySelector('a[role="link"][href*="/posts/"]');
+
+      if (!postLink) {
+        return null;
+      }
+
       const data = {
+        // MATCHING IDENTIFIERS (essential)
         postId: postId,
+        postUrl: postLink.href.split("?")[0],
+
+        // TIMING (for verification)
+        postTime: this.extractPostTime(element),
         timestamp: Date.now(),
 
-        // Basic info
-        postUrl: this.extractPostUrl(element),
-        postTime: this.extractPostTime(element),
-
-        // Author info
-        author: this.extractAuthor(element),
-
-        // Content
-        content: this.extractContent(element),
-        contentLength: 0,
-
-        // Media
-        mediaType: this.detectMediaType(element),
-        imageUrls: this.extractImageUrls(element),
-        videoUrl: this.extractVideoUrl(element),
-
-        // External link
-        externalUrl: this.extractExternalUrl(element),
-        externalDomain: null,
-
-        // Engagement
-        reactions: this.extractReactions(element),
-        comments: this.extractComments(element),
-        shares: this.extractShares(element),
-
-        // Meta
+        // DETECTION (minimal)
         isSponsored: this.detectSponsored(element),
-        hashtags: this.extractHashtags(element),
-        mentions: this.extractMentions(element),
+        mediaType: this.detectMediaType(element),
 
         // Context
         pageUrl: window.location.href,
         pageTitle: document.title,
       };
 
-      // Post-process
-      data.contentLength = data.content?.length || 0;
-      data.externalDomain = data.externalUrl
-        ? this.extractDomain(data.externalUrl)
-        : null;
-
       return data;
     } catch (error) {
-      console.error("[CMN] Error extracting post data:", error);
-      this.failedExtractions++;
       return null;
     }
   }
 
-  // Extract post URL
+  // Helper: Minimal post time extraction
+  extractPostTime(element) {
+    const postLink = element.querySelector('a[role="link"][href*="/posts/"]');
+    if (postLink?.textContent) {
+      return postLink.textContent.trim(); // Return as-is: "2 hours ago"
+    }
+    return null;
+  }
+
+  // Helper: Minimal sponsored detection
+  detectSponsored(element) {
+    const text = element.textContent.toLowerCase();
+    return text.includes("sponsored") || text.includes("ad");
+  }
+
+  // Helper: Minimal media detection
+  detectMediaType(element) {
+    if (element.querySelector("video")) return "video";
+    if (element.querySelector('img[src*="scontent"]')) return "image";
+    return "text";
+  }
+
+  // ✅ UPDATED: Extract post URL using new Facebook selectors
   extractPostUrl(element) {
     const selectors = [
+      // ✅ NEW: Facebook uses role="link" with /posts/ in href
+      'a[role="link"][href*="/posts/"]',
       'a[href*="/posts/"]',
       'a[href*="/photos/"]',
       'a[href*="/videos/"]',
@@ -72,23 +73,93 @@ class FBDataExtractor {
     ];
 
     for (const selector of selectors) {
-      const link = element.querySelector(selector);
-      if (link?.href) {
-        return link.href.split("?")[0];
+      try {
+        const link = element.querySelector(selector);
+        if (link?.href) {
+          // Extract clean URL without parameters
+          const url = link.href.split("?")[0];
+          return url;
+        }
+      } catch (e) {
+        continue;
       }
     }
 
     return null;
   }
 
-  // Extract post time
+  // ✅ UPDATED: Extract post time using new Facebook selectors
   extractPostTime(element) {
-    const abbr = element.querySelector("abbr[data-utime]");
-    if (abbr) {
-      const utime = abbr.getAttribute("data-utime");
-      return parseInt(utime) * 1000;
+    try {
+      // Strategy 1: Get timestamp from post link text (e.g., "2 hours ago")
+      const timestampLink = element.querySelector(
+        'a[role="link"][href*="/posts/"]'
+      );
+      if (timestampLink) {
+        const timeText = timestampLink.textContent.trim();
+        const parsedTime = this.parseRelativeTime(timeText);
+        if (parsedTime) {
+          return parsedTime;
+        }
+      }
+
+      // Strategy 2: Look for abbr with data-utime (older format)
+      const abbr = element.querySelector("abbr[data-utime]");
+      if (abbr) {
+        const utime = abbr.getAttribute("data-utime");
+        return parseInt(utime) * 1000;
+      }
+
+      // Strategy 3: Look for time element
+      const timeEl = element.querySelector("time");
+      if (timeEl) {
+        const datetime = timeEl.getAttribute("datetime");
+        if (datetime) {
+          return new Date(datetime).getTime();
+        }
+      }
+    } catch (e) {
     }
+
     return Date.now();
+  }
+
+  // ✅ NEW: Parse relative time like "2 hours ago"
+  parseRelativeTime(timeStr) {
+    if (!timeStr) return null;
+
+    const now = Date.now();
+    const lowerStr = timeStr.toLowerCase();
+
+    // Match patterns like "2 hours ago", "1 day ago", etc.
+    const match = timeStr.match(/(\d+)\s+(\w+)\s+ago/i);
+    if (match) {
+      const amount = parseInt(match[1]);
+      const unit = match[2].toLowerCase();
+
+      let milliseconds = 0;
+      if (unit.includes("second")) milliseconds = amount * 1000;
+      else if (unit.includes("minute")) milliseconds = amount * 60 * 1000;
+      else if (unit.includes("hour")) milliseconds = amount * 60 * 60 * 1000;
+      else if (unit.includes("day"))
+        milliseconds = amount * 24 * 60 * 60 * 1000;
+      else if (unit.includes("week"))
+        milliseconds = amount * 7 * 24 * 60 * 60 * 1000;
+      else if (unit.includes("month"))
+        milliseconds = amount * 30 * 24 * 60 * 60 * 1000;
+      else if (unit.includes("year"))
+        milliseconds = amount * 365 * 24 * 60 * 60 * 1000;
+
+      const result = now - milliseconds;
+      return result;
+    }
+
+    // Handle "just now"
+    if (lowerStr.includes("just now") || lowerStr.includes("now")) {
+      return now;
+    }
+
+    return null;
   }
 
   // Extract author information
@@ -100,21 +171,22 @@ class FBDataExtractor {
       pageType: null,
     };
 
-    // Find author link
-    const authorLink =
-      element.querySelector('a[role="link"]') ||
-      element.querySelector('a[href*="facebook.com/"]');
+    // Find author link - look for first role="link" that points to profile
+    const links = element.querySelectorAll('a[role="link"]');
+    for (const link of links) {
+      const href = link.href;
+      if (href.includes("facebook.com") && !href.includes("/posts/")) {
+        author.name = link.textContent.trim();
+        author.profileUrl = href;
+        author.profileId = this.extractProfileId(href);
 
-    if (authorLink) {
-      author.name = authorLink.textContent.trim();
-      author.profileUrl = authorLink.href;
-      author.profileId = this.extractProfileId(authorLink.href);
-
-      // Detect if page or profile
-      if (authorLink.href.includes("/pages/")) {
-        author.pageType = "page";
-      } else {
-        author.pageType = "profile";
+        // Detect if page or profile
+        if (href.includes("/pages/")) {
+          author.pageType = "page";
+        } else {
+          author.pageType = "profile";
+        }
+        break;
       }
     }
 
@@ -153,9 +225,13 @@ class FBDataExtractor {
     ];
 
     for (const selector of contentSelectors) {
-      const contentEl = element.querySelector(selector);
-      if (contentEl) {
-        return this.cleanText(contentEl.textContent);
+      try {
+        const contentEl = element.querySelector(selector);
+        if (contentEl) {
+          return this.cleanText(contentEl.textContent);
+        }
+      } catch (e) {
+        continue;
       }
     }
 
@@ -246,11 +322,15 @@ class FBDataExtractor {
     ];
 
     for (const selector of reactionSelectors) {
-      const el = element.querySelector(selector);
-      if (el) {
-        return this.parseNumber(
-          el.getAttribute("aria-label") || el.textContent
-        );
+      try {
+        const el = element.querySelector(selector);
+        if (el) {
+          return this.parseNumber(
+            el.getAttribute("aria-label") || el.textContent
+          );
+        }
+      } catch (e) {
+        continue;
       }
     }
 
@@ -265,23 +345,36 @@ class FBDataExtractor {
     ];
 
     for (const selector of commentSelectors) {
-      const el = element.querySelector(selector);
-      if (el) {
-        return this.parseNumber(el.textContent);
+      try {
+        const el = element.querySelector(selector);
+        if (el) {
+          return this.parseNumber(el.textContent);
+        }
+      } catch (e) {
+        continue;
       }
     }
 
     return 0;
   }
 
-  // Extract shares count
+  // ✅ FIXED: Extract shares count with valid selectors
   extractShares(element) {
-    const shareSelectors = ['[aria-label*="share"]', 'span:contains("Share")'];
+    const shareSelectors = [
+      '[aria-label*="share"]',
+      'a[href*="share"]',
+      'button[aria-label*="share"]',
+      'div[data-testid*="share"]',
+    ];
 
     for (const selector of shareSelectors) {
-      const el = element.querySelector(selector);
-      if (el) {
-        return this.parseNumber(el.textContent);
+      try {
+        const el = element.querySelector(selector);
+        if (el) {
+          return this.parseNumber(el.textContent);
+        }
+      } catch (e) {
+        continue;
       }
     }
 
@@ -352,6 +445,7 @@ class FBDataExtractor {
       failedExtractions: this.failedExtractions,
     };
   }
+
   // Detect ad type
   detectAdType(element) {
     const text = element.textContent.toLowerCase();

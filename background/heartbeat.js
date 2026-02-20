@@ -10,7 +10,6 @@ const HEARTBEAT_ALARM = "cmn_heartbeat";
 // INIT heartbeat
 // ------------------------------------------------------
 export async function initHeartbeatSystem() {
-  console.log("❤️ Initializing heartbeat system…");
 
   // Create alarm every X minutes
   chrome.alarms.create(HEARTBEAT_ALARM, {
@@ -34,9 +33,7 @@ export async function initHeartbeatSystem() {
       // await processPreferencesQueue(state, URLS_SERVER);
       // await processAdvertisersQueue(state, URLS_SERVER);
     } catch (e) {
-      console.error("heartbeat error:", e);
     }
   });
 
-  console.log("Heartbeat system is running.");
 }
