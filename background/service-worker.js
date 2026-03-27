@@ -128,7 +128,6 @@ async function ensureOffscreen() {
     reasons: ["DOM_PARSER"],
     justification: "Parse explanation HTML and images.",
   });
-
 }
 
 // -------------------------------------
@@ -164,9 +163,9 @@ async function init() {
   if (state.initialized) return;
   state.initialized = true;
 
-
   await ensureOffscreen();
   await user.initUserIdentification(state, URLS_SERVER);
+  await syncExtensionIcon();
   await consent.initConsentSystem(state, URLS_SERVER);
   await syncConsentIfNeeded();
   await explanations.initExplanationsSystem(state, URLS_SERVER);
@@ -178,7 +177,6 @@ async function init() {
   await sendLanguage();
 
   initAlarms();
-
 }
 
 init();
@@ -205,7 +203,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-
   (async () => {
     switch (message.type) {
       // ---------------------------
@@ -224,7 +221,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
 
       case "REGISTER_AD_BATCH":
-        await ads.handleRegisterAdBatch(state, URLS_SERVER, message, sendResponse);
+        await ads.handleRegisterAdBatch(
+          state,
+          URLS_SERVER,
+          message,
+          sendResponse
+        );
         return;
 
       case "POSTS_COLLECTED":
@@ -347,8 +349,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.processNow) {
           try {
             await explanations.processExplanationsQueue(state, URLS_SERVER);
-          } catch (e) {
-          }
+          } catch (e) {}
         }
         sendResponse({ ok: true });
         return;
@@ -370,9 +371,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // ---------------------------
       // CONSENT
       // ---------------------------
-      case "getConsentStatus":
-        sendResponse(await consent.getConsentStatus(state, URLS_SERVER));
+      case "getConsentStatus": {
+        const status = await consent.getConsentStatus(state, URLS_SERVER);
+        updateExtensionIcon(status.consent === true);
+        if (status.ok && status.currentUser) {
+          status.currentUser = hashPayload({
+            user_id: status.currentUser,
+          }).user_id;
+        }
+        sendResponse(status);
         return;
+      }
 
       case "registerConsent":
         {
@@ -382,7 +391,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             message.payload
           );
           if (result?.ok) {
-            await consent.refreshConsentFromServer(state, URLS_SERVER, true);
+            updateExtensionIcon(true);
           }
           sendResponse(result);
         }
@@ -446,10 +455,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           timestamp: Date.now(),
         };
         try {
-          await postJSON(
-            URLS_SERVER.updateSurveysNumber,
-            hashPayload(payload)
-          );
+          await postJSON(URLS_SERVER.updateSurveysNumber, hashPayload(payload));
           sendResponse({ ok: true });
         } catch (e) {
           sendResponse({ ok: false, error: e.toString() });
@@ -501,18 +507,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             func: () => {
               try {
                 if (window.requireLazy) {
-                  window.requireLazy(["CurrentUserInitialData"], function (data) {
-                    if (data?.USER_ID) {
-                      window.postMessage(
-                        {
-                          source: "CMN",
-                          type: "USER_ID",
-                          userId: String(data.USER_ID),
-                        },
-                        "*"
-                      );
+                  window.requireLazy(
+                    ["CurrentUserInitialData"],
+                    function (data) {
+                      if (data?.USER_ID) {
+                        window.postMessage(
+                          {
+                            source: "CMN",
+                            type: "USER_ID",
+                            userId: String(data.USER_ID),
+                          },
+                          "*"
+                        );
+                      }
                     }
-                  });
+                  );
                 }
               } catch (e) {}
             },
@@ -520,7 +529,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } catch (e) {
           const msg = String(e?.message || e || "");
           if (msg.includes("Frame with ID") && msg.includes("was removed")) {
-            sendResponse({ ok: false, transient: true, error: "frame_removed" });
+            sendResponse({
+              ok: false,
+              transient: true,
+              error: "frame_removed",
+            });
             return;
           }
           throw e;
@@ -586,6 +599,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // 8. Installed event
 // -------------------------------------
 chrome.runtime.onInstalled.addListener((info) => {
+  if (info.reason === "install") {
+    chrome.tabs.create({ url: chrome.runtime.getURL("ui/new_consent.html") });
+  }
 });
 
 async function sendExtensionInfo() {
@@ -599,9 +615,11 @@ async function sendExtensionInfo() {
       version: manifest?.version || "unknown",
       timestamp: Date.now(),
     };
-    await postJSON(URLS_SERVER.storeExtensionNameAndVersion, hashPayload(payload));
-  } catch (e) {
-  }
+    await postJSON(
+      URLS_SERVER.storeExtensionNameAndVersion,
+      hashPayload(payload)
+    );
+  } catch (e) {}
 }
 
 async function sendLanguage() {
@@ -615,8 +633,7 @@ async function sendLanguage() {
       timestamp: Date.now(),
     };
     await postJSON(URLS_SERVER.registerLanguage, hashPayload(payload));
-  } catch (e) {
-  }
+  } catch (e) {}
 }
 
 async function sendStillAlive() {
@@ -628,8 +645,7 @@ async function sendStillAlive() {
       timestamp: Date.now(),
     };
     await postJSON(URLS_SERVER.registerStillAlive, hashPayload(payload));
-  } catch (e) {
-  }
+  } catch (e) {}
 }
 
 async function maybeSendSurveysNumber() {
@@ -645,8 +661,7 @@ async function maybeSendSurveysNumber() {
       timestamp: Date.now(),
     };
     await postJSON(URLS_SERVER.updateSurveysNumber, hashPayload(payload));
-  } catch (e) {
-  }
+  } catch (e) {}
 }
 
 async function hasUserConsent() {
@@ -658,16 +673,40 @@ async function hasUserConsent() {
   }
 }
 
+function updateExtensionIcon(consentGiven) {
+  try {
+    const path = consentGiven
+      ? {
+          16: "../media/enabled.png",
+          48: "../media/enabled_48.png",
+          128: "../media/enabled.png",
+        }
+      : {
+          16: "../media/alert1.png",
+          48: "../media/alert1.png",
+          128: "../media/alert1.png",
+        };
+    const maybePromise = chrome.action.setIcon({ path });
+    if (maybePromise && typeof maybePromise.catch === "function") {
+      maybePromise.catch(() => {});
+    }
+  } catch (_) {}
+}
+
 async function ensureConsentStatus({
   forceServerRefresh = false,
   promptUser = false,
 } = {}) {
   try {
-    if (!state.CURRENT_USER_ID) return false;
+    if (!state.CURRENT_USER_ID) {
+      updateExtensionIcon(false);
+      return false;
+    }
     if (forceServerRefresh) {
       await consent.refreshConsentFromServer(state, URLS_SERVER, true);
     }
     const allowed = await consent.hasConsent(state.CURRENT_USER_ID);
+    updateExtensionIcon(allowed);
     if (!allowed && promptUser) {
       await maybeNotifyConsentRequired();
     }
@@ -694,8 +733,7 @@ async function maybeNotifyConsentRequired() {
     if (maybePromise && typeof maybePromise.catch === "function") {
       maybePromise.catch(() => {});
     }
-  } catch (e) {
-  }
+  } catch (e) {}
 }
 
 async function syncConsentIfNeeded() {
@@ -703,6 +741,9 @@ async function syncConsentIfNeeded() {
     const uid = state.CURRENT_USER_ID;
     if (!uid) return;
     await consent.refreshConsentFromServer(state, URLS_SERVER, true);
-  } catch (e) {
-  }
+  } catch (e) {}
+}
+
+async function syncExtensionIcon() {
+  updateExtensionIcon(await hasUserConsent());
 }

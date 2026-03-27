@@ -28,7 +28,9 @@
 // Works with your original HTML
 // ===============================
 
-const CONSENT_PAGE = "./new_consent.html";
+const CONSENT_PAGE = "ui/new_consent.html";
+
+const BASE_URL = "https://adanalystplus.lix.polytechnique.fr";
 
 // Hide everything initially
 $("#normalView").hide();
@@ -50,29 +52,23 @@ function loadConsentStatus() {
     }
 
     const hasConsent = response.consent === true;
-    const loggedIn = response.currentUser != null;
 
-    // Not logged in
-    if (!loggedIn) {
-      $("#notLoggedInView").show();
-      $("#normalView").hide();
-      $("#consentForm").hide();
-      return;
-    }
-
-    // Logged in + consent given
+    // Consent given → show normal view with links
     if (hasConsent) {
+      const uid = response.currentUser;
+      $("#general_statistics").attr(
+        "href",
+        `${BASE_URL}/general_statistics?user=${uid}`
+      );
+      $("#contact_us").attr("href", `${BASE_URL}/contact_us`);
       $("#normalView").show();
       $("#notLoggedInView").hide();
       $("#consentForm").hide();
       return;
     }
 
-    // Logged in but NO consent → open full consent page
-    chrome.runtime.sendMessage({ type: "openConsentPage" }, () => {
-      if (chrome.runtime.lastError) {
-      }
-    });
+    // No consent → open consent page (works with or without Facebook login)
+    chrome.tabs.create({ url: chrome.runtime.getURL("ui/new_consent.html") });
     window.close();
   });
 }

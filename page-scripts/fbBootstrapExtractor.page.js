@@ -114,23 +114,29 @@ class FBBootstrapExtractor {
     ) {
       return null;
     }
+    const contextSections =
+      storyNode.comet_sections?.context_layout?.story?.comet_sections || null;
+    const metadataItems = Array.isArray(contextSections?.metadata)
+      ? contextSections.metadata
+      : [];
+    const metadataStories = metadataItems
+      .map((item) => item?.story)
+      .filter(Boolean);
+    const creationStory =
+      metadataStories.find((item) => item?.creation_time != null) || null;
+    const privacyStory =
+      metadataStories.find((item) => item?.privacy_scope != null) || null;
+
     const post = {
       id: storyNode.id,
       post_id: storyNode.post_id,
       type: storyNode.__typename,
-      creation_time:
-        storyNode.comet_sections.context_layout.story.comet_sections.metadata[1]
-          .story?.creation_time || null,
+      creation_time: creationStory?.creation_time || null,
       author: null,
       attachments: [],
       message: null,
       url: null,
-      privacy:
-        storyNode.comet_sections.context_layout.story.comet_sections
-          ?.metadata[2]?.story.privacy_scope ||
-        storyNode.comet_sections.context_layout.story.comet_sections
-          ?.metadata[1]?.story.privacy_scope ||
-        null,
+      privacy: privacyStory?.privacy_scope || null,
       is_attachment:
         Array.isArray(storyNode.attachments) &&
         storyNode.attachments.length > 0,
@@ -164,8 +170,10 @@ class FBBootstrapExtractor {
       post.ad = {
         ad_id: storyNode.th_dat_spo.lbl_adv_iden || null,
         client_token: storyNode.th_dat_spo.client_token || null,
-        url: storyNode.comet_sections.content.story.attachments[0].styles
-          .attachment?.story_attachment_link_renderer?.attachment?.url,
+        url:
+          storyNode.comet_sections?.content?.story?.attachments?.[0]?.styles
+            ?.attachment?.story_attachment_link_renderer?.attachment?.url ||
+          null,
       };
     }
     // --- Extract attachments (ads & link cards) ---

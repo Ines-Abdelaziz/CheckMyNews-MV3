@@ -137,7 +137,7 @@ export async function getConsentStatus(state) {
  */
 export async function registerConsent(state, URLS_SERVER, consentPayload) {
   const uid = state.CURRENT_USER_ID;
-  if (!uid) return false;
+  if (!uid) return { ok: false, error: "no_user_id" };
 
   try {
     const manifest = chrome.runtime.getManifest();

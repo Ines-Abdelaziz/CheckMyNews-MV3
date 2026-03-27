@@ -1,35 +1,28 @@
 {
   "manifest_version": 3,
   "name": "CheckMyNews",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"
   },
-
   "permissions": [
     "storage",
     "tabs",
-    "cookies",
     "activeTab",
     "scripting",
     "offscreen",
     "notifications",
-    "alarms",
-    "declarativeNetRequest",
-    "declarativeNetRequestFeedback"
+    "alarms"
   ],
-
   "host_permissions": [
     "*://*.facebook.com/*",
     "*://adanalystplus.lix.polytechnique.fr/*"
   ],
-
   "action": {
     "default_popup": "ui/popup.html",
     "default_icon": "media/alert1.png"
   },
-
   "web_accessible_resources": [
     {
       "resources": [

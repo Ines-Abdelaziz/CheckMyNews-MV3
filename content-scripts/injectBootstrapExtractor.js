@@ -1,24 +1,43 @@
 
-// const script = document.createElement("script");
-// script.src = chrome.runtime.getURL("page-scripts/fbBootstrapExtractor.page.js");
-// script.onload = () => {
-//   script.remove();
-// };
+(function injectBootstrapExtractor() {
+  if (window.__CMN_BOOTSTRAP_INJECTED__) return;
 
-// (document.head || document.documentElement).appendChild(script);
-
-(function () {
   const inject = () => {
-    const s = document.createElement("script");
-    s.src = chrome.runtime.getURL("page-scripts/fbBootstrapExtractor.page.js");
-    s.setAttribute("data-cmn", "bootstrap");
-    (document.head || document.documentElement).appendChild(s);
+    if (!chrome?.runtime?.id) return;
+    if (window.__CMN_BOOTSTRAP_INJECTED__) return;
+    if (document.querySelector('script[data-cmn="bootstrap"]')) {
+      window.__CMN_BOOTSTRAP_INJECTED__ = true;
+      return;
+    }
+
+    const host = document.head || document.documentElement;
+    if (!host) return;
+
+    try {
+      const script = document.createElement("script");
+      script.src = chrome.runtime.getURL(
+        "page-scripts/fbBootstrapExtractor.page.js"
+      );
+      script.setAttribute("data-cmn", "bootstrap");
+      script.onload = () => {
+        window.__CMN_BOOTSTRAP_INJECTED__ = true;
+      };
+      script.onerror = () => {
+        window.__CMN_BOOTSTRAP_INJECTED__ = false;
+        script.remove();
+      };
+      host.appendChild(script);
+    } catch (error) {
+      if (!String(error?.message || error).includes("Extension context invalidated")) {
+        throw error;
+      }
+    }
   };
 
-  // Delay JUST enough to let hydration finish
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", inject);
-  } else {
-    inject();
+    document.addEventListener("DOMContentLoaded", inject, { once: true });
+    return;
   }
+
+  inject();
 })();
