@@ -151,7 +151,7 @@ class FBBootstrapExtractor {
           storyNode.comet_sections.feedback?.story.story_ufi_container.story
             .feedback_context.feedback_target_with_context
             .comet_ufi_summary_and_actions_renderer.feedback.reaction_count
-            .count || null,
+            ?.count || null,
         comment_count:
           storyNode.comet_sections.feedback?.story.story_ufi_container.story
             .feedback_context.feedback_target_with_context
@@ -161,7 +161,7 @@ class FBBootstrapExtractor {
           storyNode.comet_sections.feedback?.story.story_ufi_container.story
             .feedback_context.feedback_target_with_context
             .comet_ufi_summary_and_actions_renderer.feedback.share_count
-            .count || null,
+            ?.count || null,
       },
     };
 
@@ -192,10 +192,21 @@ class FBBootstrapExtractor {
           id: med?.id || null,
 
           image: {
-            flexible: media?.flexible_height_share_image?.uri || null,
-            large: media?.large_share_image?.uri || null,
-            width: media?.flexible_height_share_image?.width || null,
-            height: media?.flexible_height_share_image?.height || null,
+            flexible:
+              media?.flexible_height_share_image?.uri ||
+              med?.photo_image?.uri ||
+              med?.image?.uri ||
+              null,
+            large:
+              media?.large_share_image?.uri || med?.photo_image?.uri || null,
+            width:
+              media?.flexible_height_share_image?.width ||
+              med?.photo_image?.width ||
+              null,
+            height:
+              media?.flexible_height_share_image?.height ||
+              med?.photo_image?.height ||
+              null,
           },
 
           title: attachment?.title_with_entities?.text || null,
