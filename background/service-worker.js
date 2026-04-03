@@ -22,6 +22,7 @@ import "../third-party/sha512.min.js";
 // -------------------------------------
 const state = {
   CURRENT_USER_ID: null,
+  PROLIFIC_ID:null,
   LOGGED_IN: false,
   FACEBOOK_UI_VERSION: null,
   FACEBOOK_MOBILE: false,
@@ -56,7 +57,75 @@ const URLS_SERVER = {
   updateMouseMoveEvents: HOST_SERVER + "update_mousemove_event",
   updateAdVisibilityEvents: HOST_SERVER + "update_advisibility_event",
   updatePosstVisibilityEvents: HOST_SERVER + "update_postvisibility_event",
+  registerProlificId: HOST_SERVER + "storeprolificid",
+
+
 };
+
+
+// -------------------------------------
+// Get prolific ID if exists
+// -------------------------------------
+
+
+async function extractProlificIdFromUrl() {
+ try {
+ // Check if we already have a prolific PID stored
+ const stored = await lsGet("PROLIFIC_PID");
+ if (stored) {
+ state.PROLIFIC_PID = stored;
+ return;
+ }
+
+ // Try to get from chrome.storage.local (set by install.html)
+ const localData = await chrome.storage.local.get("PROLIFIC_PID");
+ if (localData.PROLIFIC_PID) {
+ state.PROLIFIC_PID = localData.PROLIFIC_PID;
+ await lsSet("PROLIFIC_PID", localData.PROLIFIC_PID);
+ console.log('Extracted prolificPid from chrome.storage.local:', localData.PROLIFIC_PID);
+ return;
+ }
+
+ // Scan all open tabs for a URL containing ?PROLIFIC_PID=xxx
+ const tabs = await chrome.tabs.query({});
+ for (const tab of tabs) {
+ if (!tab.url) continue;
+ const url = new URL(tab.url);
+ const prolificPid = url.searchParams.get("PROLIFIC_PID");
+ if (prolificPid) {
+ state.PROLIFIC_PID = prolificPid;
+ await lsSet("PROLIFIC_PID", prolificPid);
+ console.log('Extracted prolificPid from tab URL:', prolificPid);
+ return;
+ }
+ }
+
+ console.log('No PROLIFIC_PID found in storage or open tabs.');
+ } catch (e) {
+ console.error('Error extracting prolificPid from URL:', e);
+ }
+}
+
+// -------------------------------------
+// Send prolific ID
+// -------------------------------------
+
+async function sendProlificId() {
+ try {
+ if (!state.PROLIFIC_PID) return;
+ const payload = {
+ prolific_id: state.PROLIFIC_PID,
+ user_id: state.CURRENT_USER_ID, 
+ timestamp: Date.now(),
+ };
+ console.log(payload)
+ await postJSON(URLS_SERVER.registerProlificId, hashPayload(payload));
+ } catch (e) {
+ console.error('Error sending prolificId:', e);
+ }
+}
+
+
 
 async function postJSON(url, bodyObj) {
   const res = await fetch(url, {
@@ -175,6 +244,7 @@ async function init() {
   await ensureConsentStatus({ forceServerRefresh: true, promptUser: true });
   await sendExtensionInfo();
   await sendLanguage();
+  await sendProlificId();
 
   initAlarms();
 }
@@ -392,6 +462,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           );
           if (result?.ok) {
             updateExtensionIcon(true);
+            // After user ID hash is sent via registerConsent, also send prolificId mapping.
+           try {
+           await sendProlificId();
+           } catch (e) {
+           console.error('sendProlificId after registerConsent failed:', e);
+           }
           }
           sendResponse(result);
         }
@@ -600,6 +676,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // -------------------------------------
 chrome.runtime.onInstalled.addListener((info) => {
   if (info.reason === "install") {
+    await extractProlificIdFromUrl();
     chrome.tabs.create({ url: chrome.runtime.getURL("ui/new_consent.html") });
   }
 });
