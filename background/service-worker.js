@@ -15,6 +15,7 @@ import * as user from "./userIdentification.js";
 import * as iface from "./detectors.js";
 
 import { replaceUserIdEmail } from "./utils/errors.js";
+import { lsGet, lsSet } from "./utils/storage.js";
 import "../third-party/sha512.min.js";
 
 // -------------------------------------
@@ -233,6 +234,7 @@ async function init() {
   state.initialized = true;
 
   await ensureOffscreen();
+  await extractProlificIdFromUrl();
   await user.initUserIdentification(state, URLS_SERVER);
   await syncExtensionIcon();
   await consent.initConsentSystem(state, URLS_SERVER);
@@ -674,7 +676,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // -------------------------------------
 // 8. Installed event
 // -------------------------------------
-chrome.runtime.onInstalled.addListener((info) => {
+chrome.runtime.onInstalled.addListener(async (info) => {
   if (info.reason === "install") {
     await extractProlificIdFromUrl();
     chrome.tabs.create({ url: chrome.runtime.getURL("ui/new_consent.html") });
